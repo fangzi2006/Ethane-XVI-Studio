@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DiagnosticData,
   GlobalParams,
@@ -55,7 +55,22 @@ function saveLocalSlot(serial: string, kind: 'cfg' | 'light', slot: number, data
   try {
     localStorage.setItem(`${STORAGE_PREFIX}:${serial}:${kind}:${slot}`, JSON.stringify(data));
   } catch {
-    // 忽略配额限制
+    // ignore quota error
+  }
+}
+
+/**
+ * 将单层键盘配置 + 灯效配置生成稳定的二进制签名，用于精确判断“是否真正有改动”。
+ * 即使改完后又改回原样，签名也会恢复一致，彻底消除黄点误导。
+ */
+function computeSlotSignature(cfg: KeyboardConfig, light: LightConfig): string {
+  try {
+    const cfgBytes = encodeKeyboardConfig(cfg);
+    const lightBytes = encodeLightConfig(light);
+    return `${cfgBytes.join(',')}|${lightBytes.join(',')}`;
+  } catch {
+    // 当按键区超长(>468B)无法编码时回退到 JSON 签名
+    return JSON.stringify({ cfg, light });
   }
 }
 
@@ -73,7 +88,7 @@ interface DeviceContextValue {
   setSelection: (sel: SelectionTarget) => void;
 
   currentSlot: number; // 0..7
-  deviceActiveSlot: number; // 设备当前生效槽位
+  deviceActiveSlot: number;
   setCurrentSlot: (slot: number) => void;
 
   keyboardConfig: KeyboardConfig;
@@ -89,20 +104,18 @@ interface DeviceContextValue {
   busyText: string | null;
   busyProgress: number | null;
   isDirty: boolean;
+  dirtySlots: boolean[];
   toasts: ToastItem[];
   pushToast: (type: ToastItem['type'], message: string) => void;
 
-  // 连接操作
   connectWebHid: (vid?: number, pid?: number) => Promise<void>;
   connectMock: () => Promise<void>;
   disconnect: () => Promise<void>;
 
-  // 一键读写操作
   readAllFromDevice: (slotOverride?: number) => Promise<void>;
   writeAllToDevice: (mode?: 'both' | 'cfg' | 'light') => Promise<void>;
   switchDeviceSlot: (slot: number) => Promise<void>;
 
-  // 全局参数与诊断
   applyKeyDebounce: (val: number) => Promise<void>;
   calibrateRockerMid: () => Promise<void>;
   applyRockerRange: (minX: number, maxX: number, minY: number, maxY: number) => Promise<void>;
@@ -113,17 +126,22 @@ interface DeviceContextValue {
   triggerBuzzerMode: () => Promise<void>;
   playBuzzerNote: (note: number, vol: number) => Promise<void>;
 
-  // 文件导入导出
   importEtcfgBytes: (bytes: Uint8Array) => void;
   exportEtcfgBytes: () => Uint8Array;
   importEtlightBytes: (bytes: Uint8Array) => void;
   exportEtlightBytes: () => Uint8Array;
 
-  // 模拟设备交互
   mockTransportRef: React.MutableRefObject<MockTransport | null>;
 }
 
 const DeviceContext = createContext<DeviceContextValue | null>(null);
+
+function createInitialSlots() {
+  const cfgs = Array.from({ length: SLOT_COUNT }, () => createDefaultKeyboardConfig());
+  const lights = Array.from({ length: SLOT_COUNT }, () => createDefaultLightConfig());
+  const sigs = cfgs.map((c, i) => computeSlotSignature(c, lights[i]));
+  return { cfgs, lights, sigs };
+}
 
 export function DeviceProvider({ children }: { children: React.ReactNode }) {
   const transportRef = useRef<ITransport | null>(null);
@@ -142,10 +160,12 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
   const [currentSlot, setCurrentSlotState] = useState(0);
   const [deviceActiveSlot, setDeviceActiveSlot] = useState(0);
 
-  const [keyboardConfig, setKeyboardConfigRaw] = useState<KeyboardConfig>(() =>
-    createDefaultKeyboardConfig(),
-  );
-  const [lightConfig, setLightConfigRaw] = useState<LightConfig>(() => createDefaultLightConfig());
+  // 全部 8 个配置层常驻内存，切换层时互不覆盖、绝不丢失未写入修改
+  const init = useMemo(() => createInitialSlots(), []);
+  const [slotCfgs, setSlotCfgs] = useState<KeyboardConfig[]>(init.cfgs);
+  const [slotLights, setSlotLights] = useState<LightConfig[]>(init.lights);
+  const [savedSignatures, setSavedSignatures] = useState<string[]>(init.sigs);
+
   const [globalParams, setGlobalParams] = useState<GlobalParams>(() => createDefaultGlobalParams());
   const [diagnostics, setDiagnostics] = useState<DiagnosticData | null>(null);
   const [liveInput, setLiveInput] = useState<LiveInputState | null>(null);
@@ -153,7 +173,6 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
 
   const [busyText, setBusyText] = useState<string | null>(null);
   const [busyProgress, setBusyProgress] = useState<number | null>(null);
-  const [isDirty, setIsDirty] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   const toastIdRef = useRef(1);
@@ -165,37 +184,54 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     }, 3600);
   }, []);
 
+  const keyboardConfig = slotCfgs[currentSlot];
+  const lightConfig = slotLights[currentSlot];
+
+  const dirtySlots = useMemo(
+    () =>
+      slotCfgs.map(
+        (cfg, i) => computeSlotSignature(cfg, slotLights[i]) !== savedSignatures[i],
+      ),
+    [slotCfgs, slotLights, savedSignatures],
+  );
+  const isDirty = dirtySlots[currentSlot];
+
   const setKeyboardConfig: React.Dispatch<React.SetStateAction<KeyboardConfig>> = useCallback(
     (updater) => {
-      setKeyboardConfigRaw(updater);
-      setIsDirty(true);
+      setSlotCfgs((prev) => {
+        const next = [...prev];
+        next[currentSlot] =
+          typeof updater === 'function' ? updater(prev[currentSlot]) : updater;
+        return next;
+      });
     },
-    [],
+    [currentSlot],
   );
 
   const setLightConfig: React.Dispatch<React.SetStateAction<LightConfig>> = useCallback(
     (updater) => {
-      setLightConfigRaw(updater);
-      setIsDirty(true);
-    },
-    [],
-  );
-
-  const bindTransport = useCallback(
-    (transport: ITransport) => {
-      transportRef.current = transport;
-      clientRef.current = new EthaneProtocolClient(transport);
-      transport.onStatusChange((next) => {
-        setStatus(next);
-        if (next === 'disconnected') {
-          setDeviceInfo(null);
-          setLivePolling(false);
-          setLiveInput(null);
-        }
+      setSlotLights((prev) => {
+        const next = [...prev];
+        next[currentSlot] =
+          typeof updater === 'function' ? updater(prev[currentSlot]) : updater;
+        return next;
       });
     },
-    [],
+    [currentSlot],
   );
+
+  const bindTransport = useCallback((transport: ITransport) => {
+    transportRef.current = transport;
+    clientRef.current = new EthaneProtocolClient(transport);
+    transport.onStatusChange((next) => {
+      setStatus(next);
+      if (next === 'disconnected') {
+        setDeviceInfo(null);
+        setLivePolling(false);
+        setLiveInput(null);
+      }
+    });
+  }, []);
 
   const readAllFromDevice = useCallback(
     async (slotOverride?: number) => {
@@ -231,20 +267,33 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         }
 
         try {
-          setBusyText(`正在从设备回读槽位 ${targetSlot + 1} 按键配置...`);
+          setBusyText(`正在从设备读取 L${targetSlot + 1} 按键配置...`);
           const cfg = await client.readKeyboardConfig(targetSlot, (p) =>
             setBusyProgress(15 + Math.round(p * 0.45)),
           );
-          setBusyText(`正在从设备回读槽位 ${targetSlot + 1} 灯效配置...`);
+          setBusyText(`正在从设备读取 L${targetSlot + 1} 灯效配置...`);
           const light = await client.readLightConfig(targetSlot, (p) =>
             setBusyProgress(60 + Math.round(p * 0.4)),
           );
-          setKeyboardConfigRaw(cfg);
-          setLightConfigRaw(light);
+
+          setSlotCfgs((prev) => {
+            const next = [...prev];
+            next[targetSlot] = cfg;
+            return next;
+          });
+          setSlotLights((prev) => {
+            const next = [...prev];
+            next[targetSlot] = light;
+            return next;
+          });
+          setSavedSignatures((prev) => {
+            const next = [...prev];
+            next[targetSlot] = computeSlotSignature(cfg, light);
+            return next;
+          });
           saveLocalSlot(uid, 'cfg', targetSlot, cfg);
           saveLocalSlot(uid, 'light', targetSlot, light);
           setFirmwareSupportsReadback(true);
-          setIsDirty(false);
         } catch (err) {
           if (err instanceof InvalidCommandError) {
             usedFallback = true;
@@ -252,9 +301,23 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
             setLegacyNoticeDismissed(false);
             const cachedCfg = loadLocalSlot<KeyboardConfig>(uid, 'cfg', targetSlot);
             const cachedLight = loadLocalSlot<LightConfig>(uid, 'light', targetSlot);
-            if (cachedCfg) setKeyboardConfigRaw(cachedCfg);
-            if (cachedLight) setLightConfigRaw(cachedLight);
-            setIsDirty(false);
+            const finalCfg = cachedCfg ?? createDefaultKeyboardConfig();
+            const finalLight = cachedLight ?? createDefaultLightConfig();
+            setSlotCfgs((prev) => {
+              const next = [...prev];
+              next[targetSlot] = finalCfg;
+              return next;
+            });
+            setSlotLights((prev) => {
+              const next = [...prev];
+              next[targetSlot] = finalLight;
+              return next;
+            });
+            setSavedSignatures((prev) => {
+              const next = [...prev];
+              next[targetSlot] = computeSlotSignature(finalCfg, finalLight);
+              return next;
+            });
           } else {
             throw err;
           }
@@ -263,10 +326,10 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         if (usedFallback) {
           pushToast(
             'warning',
-            `当前为旧版固件，不支持从设备直接读取配置（已恢复本地槽位 ${targetSlot + 1} 缓存，如需支持请烧录新版固件）`,
+            `当前为旧版固件，不支持直接从设备读取配置（已载入本地 L${targetSlot + 1} 缓存，如需支持请更新固件）`,
           );
         } else {
-          pushToast('success', `已成功从设备读取槽位 ${targetSlot + 1} 的完整配置`);
+          pushToast('success', `已从设备读取 L${targetSlot + 1} 完整配置`);
         }
       } catch (err) {
         pushToast('error', `读取失败：${err instanceof Error ? err.message : String(err)}`);
@@ -329,22 +392,13 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     pushToast('info', '已断开设备连接');
   }, [pushToast]);
 
-  const setCurrentSlot = useCallback(
-    (slot: number) => {
-      const clamped = Math.max(0, Math.min(SLOT_COUNT - 1, slot));
-      setCurrentSlotState(clamped);
-      if (status === 'connected' || status === 'mock') {
-        void readAllFromDevice(clamped);
-      } else {
-        const cachedCfg = loadLocalSlot<KeyboardConfig>(serialNumber, 'cfg', clamped);
-        const cachedLight = loadLocalSlot<LightConfig>(serialNumber, 'light', clamped);
-        setKeyboardConfigRaw(cachedCfg ?? createDefaultKeyboardConfig());
-        setLightConfigRaw(cachedLight ?? createDefaultLightConfig());
-        setIsDirty(false);
-      }
-    },
-    [status, serialNumber, readAllFromDevice],
-  );
+  /**
+   * 仅切换当前编辑的配置层，不自动从设备覆盖读取，避免意外丢失未保存的修改。
+   */
+  const setCurrentSlot = useCallback((slot: number) => {
+    const clamped = Math.max(0, Math.min(SLOT_COUNT - 1, slot));
+    setCurrentSlotState(clamped);
+  }, []);
 
   const writeAllToDevice = useCallback(
     async (mode: 'both' | 'cfg' | 'light' = 'both') => {
@@ -354,26 +408,33 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      setBusyText(`正在写入槽位 ${currentSlot + 1}...`);
+      const cfg = slotCfgs[currentSlot];
+      const light = slotLights[currentSlot];
+
+      setBusyText(`正在写入 L${currentSlot + 1}...`);
       setBusyProgress(5);
       try {
         if (mode === 'both' || mode === 'cfg') {
-          setBusyText(`正在写入槽位 ${currentSlot + 1} 按键配置...`);
-          await client.writeKeyboardConfig(currentSlot, keyboardConfig, (p) =>
+          setBusyText(`正在写入 L${currentSlot + 1} 按键配置...`);
+          await client.writeKeyboardConfig(currentSlot, cfg, (p) =>
             setBusyProgress(mode === 'both' ? Math.round(p * 0.65) : p),
           );
-          saveLocalSlot(serialNumber, 'cfg', currentSlot, keyboardConfig);
+          saveLocalSlot(serialNumber, 'cfg', currentSlot, cfg);
         }
         if (mode === 'both' || mode === 'light') {
-          setBusyText(`正在写入槽位 ${currentSlot + 1} 灯效配置...`);
-          await client.writeLightConfig(currentSlot, lightConfig, (p) =>
+          setBusyText(`正在写入 L${currentSlot + 1} 灯效配置...`);
+          await client.writeLightConfig(currentSlot, light, (p) =>
             setBusyProgress(mode === 'both' ? 65 + Math.round(p * 0.35) : p),
           );
-          saveLocalSlot(serialNumber, 'light', currentSlot, lightConfig);
+          saveLocalSlot(serialNumber, 'light', currentSlot, light);
         }
-        setIsDirty(false);
+        setSavedSignatures((prev) => {
+          const next = [...prev];
+          next[currentSlot] = computeSlotSignature(cfg, light);
+          return next;
+        });
         const label = mode === 'cfg' ? '按键配置' : mode === 'light' ? '灯效配置' : '按键与灯效配置';
-        pushToast('success', `槽位 ${currentSlot + 1} ${label}已成功写入设备！`);
+        pushToast('success', `L${currentSlot + 1} ${label}已成功写入设备！`);
       } catch (err) {
         pushToast('error', `写入失败：${err instanceof Error ? err.message : String(err)}`);
       } finally {
@@ -381,7 +442,7 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         setBusyProgress(null);
       }
     },
-    [currentSlot, keyboardConfig, lightConfig, serialNumber, pushToast],
+    [currentSlot, slotCfgs, slotLights, serialNumber, pushToast],
   );
 
   const switchDeviceSlot = useCallback(
@@ -391,7 +452,7 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
       try {
         await client.switchActiveSlot(slot);
         setDeviceActiveSlot(slot);
-        pushToast('success', `设备已切换至槽位 ${slot + 1}`);
+        pushToast('success', `设备已切换至 L${slot + 1}`);
       } catch (err) {
         pushToast('error', `切换失败：${err instanceof Error ? err.message : String(err)}`);
       }
@@ -424,7 +485,7 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         rockerMidX: res.newMidX,
         rockerMidY: res.newMidY,
       }));
-      pushToast('success', `摇杆中位校准完成：(${res.newMidX}, ${res.newMidY})`);
+      pushToast('success', `摇杆中心点已校准为 (${res.newMidX}, ${res.newMidY})`);
     } catch (err) {
       pushToast('error', err instanceof Error ? err.message : '中位校准失败');
     }
@@ -524,7 +585,6 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     [pushToast],
   );
 
-  // 实时输入轮询
   useEffect(() => {
     if (!livePolling || (status !== 'connected' && status !== 'mock')) return;
     let active = true;
@@ -535,7 +595,7 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         const input = await client.readLiveInput();
         if (active) setLiveInput(input);
       } catch {
-        // 忽略偶发轮询超时
+        // ignore transient poll timeout
       }
     };
     void tick();
@@ -550,33 +610,37 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     (bytes: Uint8Array) => {
       try {
         const cfg = decodeKeyboardConfig(bytes);
-        setKeyboardConfigRaw(cfg);
-        setIsDirty(true);
-        pushToast('success', '已成功导入 .etcfg 键盘配置文件');
+        setKeyboardConfig(cfg);
+        pushToast('success', '已导入 .etcfg 配置文件（请点击“写入”生效）');
       } catch (err) {
         pushToast('error', err instanceof Error ? err.message : '导入 .etcfg 失败');
       }
     },
-    [pushToast],
+    [setKeyboardConfig, pushToast],
   );
 
-  const exportEtcfgBytes = useCallback(() => encodeKeyboardConfig(keyboardConfig), [keyboardConfig]);
+  const exportEtcfgBytes = useCallback(
+    () => encodeKeyboardConfig(slotCfgs[currentSlot]),
+    [slotCfgs, currentSlot],
+  );
 
   const importEtlightBytes = useCallback(
     (bytes: Uint8Array) => {
       try {
         const light = decodeLightConfig(bytes);
-        setLightConfigRaw(light);
-        setIsDirty(true);
-        pushToast('success', '已成功导入 .etlight 灯效配置文件');
+        setLightConfig(light);
+        pushToast('success', '已导入 .etlight 灯效文件（请点击“写入”生效）');
       } catch (err) {
         pushToast('error', err instanceof Error ? err.message : '导入 .etlight 失败');
       }
     },
-    [pushToast],
+    [setLightConfig, pushToast],
   );
 
-  const exportEtlightBytes = useCallback(() => encodeLightConfig(lightConfig), [lightConfig]);
+  const exportEtlightBytes = useCallback(
+    () => encodeLightConfig(slotLights[currentSlot]),
+    [slotLights, currentSlot],
+  );
 
   return (
     <DeviceContext.Provider
@@ -607,6 +671,7 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         busyText,
         busyProgress,
         isDirty,
+        dirtySlots,
         toasts,
         pushToast,
         connectWebHid,

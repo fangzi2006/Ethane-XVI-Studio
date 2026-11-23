@@ -1,4 +1,5 @@
 import {
+  ChevronDown,
   Gamepad2,
   Keyboard,
   Layers,
@@ -45,9 +46,10 @@ function modeToCategory(mode: KeyMode): KeyCategory {
 }
 
 export function KeyEditor() {
-  const { selection, keyboardConfig, setKeyboardConfig } = useDevice();
+  const { selection, keyboardConfig, setKeyboardConfig, pushToast } = useDevice();
   const [rockerFocus, setRockerFocus] = useState<'up' | 'down' | 'left' | 'right' | 'center'>('up');
   const [encoderFocus, setEncoderFocus] = useState<'ccw' | 'press' | 'cw'>('ccw');
+  const [showRockerAdvanced, setShowRockerAdvanced] = useState(false);
   const totalKeyBytes = calculateKeySectionSize(keyboardConfig.keys);
 
   // ==================== 1. 机械按键 K1~K16 ====================
@@ -67,7 +69,9 @@ export function KeyEditor() {
     const switchCategory = (cat: KeyCategory) => {
       if (cat === category) return;
       if (cat === 'basic') {
-        patchKey({ mode: keyCfg.key ? (keyCfg.func ? KeyMode.Shortcut : KeyMode.Single) : KeyMode.None });
+        patchKey({
+          mode: keyCfg.key ? (keyCfg.func ? KeyMode.Shortcut : KeyMode.Single) : KeyMode.None,
+        });
       } else if (cat === 'macro') {
         patchKey({ mode: KeyMode.Macro });
       } else if (cat === 'switch') {
@@ -104,7 +108,6 @@ export function KeyEditor() {
 
     return (
       <div className="space-y-4">
-        {/* 头部标题 */}
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3.5">
           <div className="flex items-center gap-2.5">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-500/20 font-mono text-sm font-bold text-indigo-300">
@@ -112,11 +115,14 @@ export function KeyEditor() {
             </div>
             <div>
               <h2 className="text-base font-semibold text-white">按键 K{idx + 1}</h2>
-              <p className="text-xs text-slate-400">选择功能类型，直接录制按键即可生效</p>
+              <p className="text-xs text-slate-400">选择想要的功能类型，直接录制按键即可</p>
             </div>
           </div>
-          <div className="rounded-lg border border-slate-800 bg-slate-950/70 px-2.5 py-1 text-[11px] text-slate-400">
-            总容量{' '}
+          <div
+            className="rounded-lg border border-slate-800 bg-slate-950/70 px-2.5 py-1 text-[11px] text-slate-400"
+            title="本层所有 16 颗按键共享 468 字节固件空间"
+          >
+            空间{' '}
             <span
               className={`font-mono font-semibold ${
                 totalKeyBytes > KEY_SECTION_MAX_BYTES ? 'text-rose-400' : 'text-slate-200'
@@ -127,7 +133,7 @@ export function KeyEditor() {
           </div>
         </div>
 
-        {/* 5 大直觉分类标签 */}
+        {/* 5 大直觉分类 */}
         <div className="grid grid-cols-5 gap-1.5 rounded-xl border border-slate-800 bg-slate-950/70 p-1">
           {categories.map((c) => {
             const Icon = c.icon;
@@ -150,7 +156,6 @@ export function KeyEditor() {
           })}
         </div>
 
-        {/* 内容面板 */}
         <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
           {category === 'basic' && (
             <div className="space-y-3">
@@ -159,10 +164,9 @@ export function KeyEditor() {
                 func={keyCfg.mode === KeyMode.Shortcut ? keyCfg.func : 0}
                 allowModifiers
                 allowModifierAsMainKey
-                label="直接按下单键或组合快捷键（自动识别单键/快捷键）"
+                label="按下键盘直接录制（支持单键或 Ctrl/Shift/Alt/Win 组合键）"
                 onChange={handleBasicKeyChange}
               />
-              {/* 常用效率快捷键一键填入 */}
               <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-800 pt-3 text-[11px]">
                 <span className="text-slate-500">常用一键填入：</span>
                 {[
@@ -209,8 +213,10 @@ export function KeyEditor() {
                       : 'border-slate-800 bg-slate-950 text-slate-400'
                   }`}
                 >
-                  <div className="text-xs font-semibold">临时切换（类似 Fn 键）</div>
-                  <div className="mt-0.5 text-[11px] text-slate-400">按住时临时切层，松开即刻恢复</div>
+                  <div className="text-xs font-semibold">按住临时切换（Fn 风格）</div>
+                  <div className="mt-0.5 text-[11px] text-slate-400">
+                    按住此键时使用目标层，松手立刻切回原层
+                  </div>
                 </button>
                 <button
                   type="button"
@@ -221,13 +227,15 @@ export function KeyEditor() {
                       : 'border-slate-800 bg-slate-950 text-slate-400'
                   }`}
                 >
-                  <div className="text-xs font-semibold">永久切换</div>
-                  <div className="mt-0.5 text-[11px] text-slate-400">按一下永久切换至目标配置层</div>
+                  <div className="text-xs font-semibold">点按永久切换</div>
+                  <div className="mt-0.5 text-[11px] text-slate-400">
+                    按一下松开后永久停留在目标配置层
+                  </div>
                 </button>
               </div>
 
               <div>
-                <span className="mb-2 block text-xs font-medium text-slate-300">目标配置层</span>
+                <span className="mb-2 block text-xs font-medium text-slate-300">切换到哪一层？</span>
                 <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
                   {Array.from({ length: SLOT_COUNT }, (_, i) => {
                     const targetNum = i + 1;
@@ -255,7 +263,7 @@ export function KeyEditor() {
                 <div className="border-t border-slate-800 pt-3">
                   <KeyCaptureInput
                     usbKey={keyCfg.key}
-                    label="轻按复用单键（可选：仅轻点此键未组合其他键时输出）"
+                    label="轻点复用键（可选：单按一下此键不组合其他键时，额外触发这个单键）"
                     onChange={(k) => patchKey({ key: k })}
                   />
                 </div>
@@ -267,12 +275,12 @@ export function KeyEditor() {
             <div className="space-y-4">
               <KeyCaptureInput
                 usbKey={keyCfg.key}
-                label="要连点的按键"
+                label="选择要自动连点的按键（如鼠标左键或游戏技能键）"
                 onChange={(k) => patchKey({ key: k })}
               />
               <div className="grid gap-4 border-t border-slate-800 pt-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <span className="text-xs font-medium text-slate-300">触发方式</span>
+                  <span className="text-xs font-medium text-slate-300">连点方式</span>
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
@@ -283,7 +291,7 @@ export function KeyEditor() {
                           : 'border-slate-800 bg-slate-950 text-slate-400'
                       }`}
                     >
-                      按住连点
+                      按住时连点
                     </button>
                     <button
                       type="button"
@@ -300,11 +308,11 @@ export function KeyEditor() {
                 </div>
                 <label className="space-y-1.5 text-xs">
                   <div className="flex justify-between text-slate-300">
-                    <span>连点间隔 (ms)</span>
+                    <span>点击间隔</span>
                     <span className="text-indigo-300">
                       {keyCfg.delayMs === 0
-                        ? '长按不松'
-                        : `约 ${(1000 / Math.max(15, keyCfg.delayMs)).toFixed(1)} 次/秒`}
+                        ? '0ms（持续按住不松）'
+                        : `${keyCfg.delayMs}ms（约 ${(1000 / Math.max(15, keyCfg.delayMs)).toFixed(1)} 次/秒）`}
                     </span>
                   </div>
                   <input
@@ -326,8 +334,8 @@ export function KeyEditor() {
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {[
-                  { mode: KeyMode.CursorClick, label: '屏幕定位点击' },
-                  { mode: KeyMode.CursorMove, label: '屏幕定位移位' },
+                  { mode: KeyMode.CursorClick, label: '屏幕定点点击' },
+                  { mode: KeyMode.CursorMove, label: '屏幕定点移动' },
                   { mode: KeyMode.Buzzer, label: '蜂鸣器演奏' },
                   { mode: KeyMode.Morse, label: '摩尔斯电码' },
                 ].map((opt) => (
@@ -350,11 +358,11 @@ export function KeyEditor() {
                 <div className="space-y-3 border-t border-slate-800 pt-3">
                   <div className="flex items-center gap-1.5 text-xs text-slate-400">
                     <MousePointerClick className="h-3.5 w-3.5 text-emerald-400" />
-                    按当前屏幕 {keyboardConfig.screenWidth}×{keyboardConfig.screenHeight} 映射绝对坐标
+                    按下后鼠标直接跳至屏幕坐标（按 {keyboardConfig.screenWidth}×{keyboardConfig.screenHeight} 换算）
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <label className="space-y-1 text-xs">
-                      <span className="text-slate-300">X 坐标 (px)</span>
+                      <span className="text-slate-300">横向 X 坐标 (px)</span>
                       <input
                         type="number"
                         min={0}
@@ -365,7 +373,7 @@ export function KeyEditor() {
                       />
                     </label>
                     <label className="space-y-1 text-xs">
-                      <span className="text-slate-300">Y 坐标 (px)</span>
+                      <span className="text-slate-300">纵向 Y 坐标 (px)</span>
                       <input
                         type="number"
                         min={0}
@@ -381,17 +389,20 @@ export function KeyEditor() {
 
               {keyCfg.mode === KeyMode.Buzzer && (
                 <p className="border-t border-slate-800 pt-3 text-xs text-slate-300">
-                  按下此键进入小键盘蜂鸣器演奏模式（旋钮调节音量，按下摇杆或旋钮退出）。演奏模式下请勿进行上位机写入。
+                  按下此键后，16 颗按键会临时变为电子琴键发声（旋钮调音量，按下摇杆或旋钮即可退出）。演奏时请勿写入配置。
                 </p>
               )}
 
               {keyCfg.mode === KeyMode.Morse && (
                 <div className="space-y-3 border-t border-slate-800 pt-3">
+                  <p className="text-[11px] text-slate-400">
+                    像电报机一样通过长短按输入字母与标点：单键模式靠按住时长区分点/划，双键模式分别绑定一个“点”键和一个“划”键。
+                  </p>
                   <div className="grid grid-cols-3 gap-2">
                     {[
-                      { val: 2, label: '单键 (· / -)' },
-                      { val: 0, label: '双键 · 点' },
-                      { val: 1, label: '双键 · 划' },
+                      { val: 2, label: '单键模式 (点+划)' },
+                      { val: 0, label: '双键 · 点 (·)' },
+                      { val: 1, label: '双键 · 划 (-)' },
                     ].map((opt) => (
                       <button
                         key={opt.val}
@@ -409,7 +420,7 @@ export function KeyEditor() {
                   </div>
                   <div className="grid gap-3 sm:grid-cols-3 text-xs">
                     <label className="space-y-1">
-                      <span className="text-slate-300">音量 {morseVol}/10</span>
+                      <span className="text-slate-300">蜂鸣提示音量：{morseVol}/10</span>
                       <input
                         type="range"
                         min={0}
@@ -422,7 +433,7 @@ export function KeyEditor() {
                       />
                     </label>
                     <label className="space-y-1">
-                      <span className="text-slate-300">字符间隔 {keyCfg.morseGap * 10}ms</span>
+                      <span className="text-slate-300">停顿多久输出字符：{keyCfg.morseGap * 10}ms</span>
                       <input
                         type="range"
                         min={1}
@@ -434,7 +445,7 @@ export function KeyEditor() {
                     </label>
                     {morseType === 2 && (
                       <label className="space-y-1">
-                        <span className="text-slate-300">长按阈值 {keyCfg.morseLong * 10}ms</span>
+                        <span className="text-slate-300">超过多久算“划”：{keyCfg.morseLong * 10}ms</span>
                         <input
                           type="range"
                           min={1}
@@ -455,12 +466,23 @@ export function KeyEditor() {
     );
   }
 
-  // ==================== 2. 摇杆 RK1（紧凑十字交互式） ====================
+  // ==================== 2. 摇杆 RK1（场景化人话重构） ====================
   if (selection.kind === 'rocker') {
     const rk = keyboardConfig.rocker;
     const patchRocker = (patch: Partial<typeof rk>) =>
       setKeyboardConfig((prev) => ({ ...prev, rocker: { ...prev.rocker, ...patch } }));
     const permSlot = usbKeyToDigit(rk.centerKey) ?? 1;
+    const isKeyMode = rk.mode === RockerMode.FourWay || rk.mode === RockerMode.EightWay;
+    const isRepeatMode = rk.nearParam > 0 || rk.farParam > 0;
+
+    // 光标区域可视化预览计算
+    const pctUp = cursorRangeKeyToPercent(rk.upKey);
+    const pctDown = cursorRangeKeyToPercent(rk.downKey);
+    const pctLeft = cursorRangeKeyToPercent(rk.leftKey);
+    const pctRight = cursorRangeKeyToPercent(rk.rightKey);
+    const centerX = (rk.inertia / 50) * 100;
+    const centerY = (rk.nearParam / 50) * 100;
+    const scale = Math.max(0.15, rk.farParam / 50);
 
     const dirItems: {
       id: 'up' | 'down' | 'left' | 'right' | 'center';
@@ -487,34 +509,93 @@ export function KeyEditor() {
 
     return (
       <div className="space-y-4">
-        <div className="flex items-center gap-2.5 border-b border-slate-800 pb-3.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-cyan-500/15 text-cyan-300">
-            <Gamepad2 className="h-5 w-5" />
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3.5">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-cyan-500/15 text-cyan-300">
+              <Gamepad2 className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="text-base font-semibold text-white">摇杆 RK1（左上角）</h2>
+              <p className="text-xs text-slate-400">可模拟方向键、鼠标移动或屏幕区域指针，支持下压触发</p>
+            </div>
           </div>
-          <div>
-            <h2 className="text-base font-semibold text-white">摇杆 RK1（左上角）</h2>
-            <p className="text-xs text-slate-400">选择摇杆模式，点击下方方向块即可聚焦修改单个方向键位</p>
+
+          {/* 快捷场景一键配置 */}
+          <div className="flex flex-wrap gap-1.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => {
+                patchRocker({
+                  mode: RockerMode.FourWay,
+                  upKey: 82,
+                  downKey: 81,
+                  leftKey: 80,
+                  rightKey: 79,
+                  nearParam: 0,
+                  farParam: 0,
+                });
+                pushToast('success', '摇杆已设为「上下左右方向键（长按）」');
+              }}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-cyan-400"
+            >
+              方向键
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                patchRocker({
+                  mode: RockerMode.EightWay,
+                  upKey: 26,
+                  downKey: 22,
+                  leftKey: 4,
+                  rightKey: 7,
+                  nearParam: 0,
+                  farParam: 0,
+                });
+                pushToast('success', '摇杆已设为「游戏 WASD（8向斜走）」');
+              }}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-cyan-400"
+            >
+              游戏 WASD
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                patchRocker({
+                  mode: RockerMode.SpeedMouse,
+                  deadzone: 15,
+                  inertia: 10,
+                  nearParam: 2,
+                  farParam: 25,
+                });
+                pushToast('success', '摇杆已设为「速度鼠标」');
+              }}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-cyan-400"
+            >
+              模拟鼠标
+            </button>
           </div>
         </div>
 
+        {/* 模式选择 */}
         <div className="grid gap-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4 sm:grid-cols-2">
           <label className="space-y-1 text-xs">
-            <span className="font-medium text-slate-300">推动模式</span>
+            <span className="font-medium text-slate-300">推动摇杆时的用途</span>
             <select
               value={rk.mode}
               onChange={(e) => patchRocker({ mode: Number(e.target.value) as RockerMode })}
               className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white"
             >
               <option value={RockerMode.None}>禁用推动</option>
-              <option value={RockerMode.FourWay}>4 向按键（WASD 等）</option>
-              <option value={RockerMode.EightWay}>8 向按键（支持斜向双键）</option>
-              <option value={RockerMode.SpeedMouse}>速度鼠标</option>
-              <option value={RockerMode.CursorPos}>绝对光标区域</option>
+              <option value={RockerMode.FourWay}>十字 4 方向按键（一次只触发一个方向）</option>
+              <option value={RockerMode.EightWay}>8 方向按键（斜推同时触发两键，适合游戏）</option>
+              <option value={RockerMode.SpeedMouse}>模拟鼠标移动（推得越远移动越快）</option>
+              <option value={RockerMode.CursorPos}>屏幕区域定位（松手回中，适合摇杆选点）</option>
             </select>
           </label>
 
           <label className="space-y-1 text-xs">
-            <span className="font-medium text-slate-300">下压按键模式</span>
+            <span className="font-medium text-slate-300">垂直按下摇杆时的用途</span>
             <select
               value={rk.keyMode}
               onChange={(e) => patchRocker({ keyMode: Number(e.target.value) as AuxKeyMode })}
@@ -526,46 +607,14 @@ export function KeyEditor() {
               <option value={AuxKeyMode.Dial}>Surface Dial 按压</option>
             </select>
           </label>
-
-          <div className="flex flex-wrap gap-4 text-xs sm:col-span-2">
-            <label className="flex items-center gap-1.5 text-slate-300">
-              <input
-                type="checkbox"
-                checked={rk.invertX}
-                onChange={(e) => patchRocker({ invertX: e.target.checked })}
-              />
-              左右反向
-            </label>
-            <label className="flex items-center gap-1.5 text-slate-300">
-              <input
-                type="checkbox"
-                checked={rk.invertY}
-                onChange={(e) => patchRocker({ invertY: e.target.checked })}
-              />
-              上下反向
-            </label>
-            <label className="flex items-center gap-1.5 text-slate-300">
-              <input
-                type="checkbox"
-                checked={rk.rotateR90}
-                onChange={(e) => patchRocker({ rotateR90: e.target.checked })}
-              />
-              坐标系右旋 90°
-            </label>
-          </div>
         </div>
 
-        {/* 紧凑方向聚焦选择器 */}
-        {(rk.mode === RockerMode.FourWay ||
-          rk.mode === RockerMode.EightWay ||
-          rk.keyMode !== AuxKeyMode.None) && (
+        {/* 方向/下压绑定卡片 */}
+        {(isKeyMode || rk.keyMode !== AuxKeyMode.None) && (
           <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
             <div className="grid grid-cols-5 gap-2">
               {dirItems.map((item) => {
-                const disabled =
-                  item.id !== 'center' &&
-                  rk.mode !== RockerMode.FourWay &&
-                  rk.mode !== RockerMode.EightWay;
+                const disabled = item.id !== 'center' && !isKeyMode;
                 const active = rockerFocus === item.id;
                 return (
                   <button
@@ -592,12 +641,12 @@ export function KeyEditor() {
                   usbKey={rk.centerKey}
                   func={rk.centerFunc}
                   allowModifiers
-                  label="摇杆中心下压按键"
+                  label="摇杆下压按键"
                   onChange={(k, f) => patchRocker({ centerKey: k, centerFunc: f })}
                 />
               ) : rk.keyMode === AuxKeyMode.PermSwitch ? (
                 <div className="space-y-2">
-                  <span className="text-xs text-slate-300">按下摇杆切换至目标配置层：</span>
+                  <span className="text-xs text-slate-300">按下摇杆后切换到哪一层？</span>
                   <div className="grid grid-cols-8 gap-1.5">
                     {Array.from({ length: SLOT_COUNT }, (_, i) => (
                       <button
@@ -616,10 +665,10 @@ export function KeyEditor() {
                   </div>
                 </div>
               ) : (
-                <p className="text-xs text-slate-500">当前下压模式无需单独绑定键值。</p>
+                <p className="text-xs text-slate-500">当前下压模式无需单独绑定按键。</p>
               )
             ) : (
-              (rk.mode === RockerMode.FourWay || rk.mode === RockerMode.EightWay) && (
+              isKeyMode && (
                 <KeyCaptureInput
                   usbKey={
                     rockerFocus === 'up'
@@ -644,40 +693,73 @@ export function KeyEditor() {
           </div>
         )}
 
-        {/* 死区与手感参数 */}
-        {rk.mode !== RockerMode.None && (
-          <div className="grid gap-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4 text-xs sm:grid-cols-2">
-            <label className="space-y-1">
-              <div className="flex justify-between text-slate-300">
-                <span>死区阈值</span>
-                <span className="font-mono text-indigo-300">{rk.deadzone}/200</span>
+        {/* 按模式动态呈现易懂的手感参数 */}
+        {isKeyMode && (
+          <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-medium text-slate-200">推住摇杆时的触发行为</span>
+              <div className="flex rounded-lg border border-slate-800 bg-slate-950 p-0.5">
+                <button
+                  type="button"
+                  onClick={() => patchRocker({ nearParam: 0, farParam: 0 })}
+                  className={`rounded-md px-3 py-1 font-medium ${
+                    !isRepeatMode ? 'bg-indigo-600 text-white' : 'text-slate-400'
+                  }`}
+                >
+                  普通长按（推荐）
+                </button>
+                <button
+                  type="button"
+                  onClick={() => patchRocker({ nearParam: 5, farParam: 35 })}
+                  className={`rounded-md px-3 py-1 font-medium ${
+                    isRepeatMode ? 'bg-indigo-600 text-white' : 'text-slate-400'
+                  }`}
+                >
+                  推越远连点越快
+                </button>
               </div>
-              <input
-                type="range"
-                min={0}
-                max={200}
-                value={rk.deadzone}
-                onChange={(e) => patchRocker({ deadzone: Number(e.target.value) })}
-                className="w-full accent-indigo-500"
-              />
-            </label>
-            <label className="space-y-1">
-              <div className="flex justify-between text-slate-300">
-                <span>{rk.mode === RockerMode.CursorPos ? '中心点 X' : '惯性平滑'}</span>
-                <span className="font-mono text-indigo-300">{rk.inertia}/50</span>
+            </div>
+
+            {isRepeatMode && (
+              <div className="grid gap-3 border-t border-slate-800 pt-3 sm:grid-cols-2">
+                <label className="space-y-1">
+                  <div className="flex justify-between text-slate-300">
+                    <span>轻推起步连点速度</span>
+                    <span className="font-mono text-indigo-300">{rk.nearParam}/50</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={50}
+                    value={rk.nearParam}
+                    onChange={(e) => patchRocker({ nearParam: Number(e.target.value) })}
+                    className="w-full accent-indigo-500"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <div className="flex justify-between text-slate-300">
+                    <span>推到底最快连点速度</span>
+                    <span className="font-mono text-indigo-300">{rk.farParam}/50</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1}
+                    max={50}
+                    value={rk.farParam}
+                    onChange={(e) => patchRocker({ farParam: Number(e.target.value) })}
+                    className="w-full accent-indigo-500"
+                  />
+                </label>
               </div>
-              <input
-                type="range"
-                min={0}
-                max={50}
-                value={rk.inertia}
-                onChange={(e) => patchRocker({ inertia: Number(e.target.value) })}
-                className="w-full accent-indigo-500"
-              />
-            </label>
+            )}
+          </div>
+        )}
+
+        {rk.mode === RockerMode.SpeedMouse && (
+          <div className="grid gap-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4 text-xs sm:grid-cols-3">
             <label className="space-y-1">
               <div className="flex justify-between text-slate-300">
-                <span>{rk.mode === RockerMode.CursorPos ? '中心点 Y' : '近端幅度'}</span>
+                <span>轻推起步速度</span>
                 <span className="font-mono text-indigo-300">{rk.nearParam}/50</span>
               </div>
               <input
@@ -691,49 +773,181 @@ export function KeyEditor() {
             </label>
             <label className="space-y-1">
               <div className="flex justify-between text-slate-300">
-                <span>{rk.mode === RockerMode.CursorPos ? '范围缩放' : '远端幅度'}</span>
+                <span>推满最大移速</span>
                 <span className="font-mono text-indigo-300">{rk.farParam}/50</span>
               </div>
               <input
                 type="range"
-                min={0}
+                min={1}
                 max={50}
                 value={rk.farParam}
                 onChange={(e) => patchRocker({ farParam: Number(e.target.value) })}
                 className="w-full accent-indigo-500"
               />
             </label>
+            <label className="space-y-1">
+              <div className="flex justify-between text-slate-300">
+                <span>起步柔和阻尼（惯性）</span>
+                <span className="font-mono text-indigo-300">{rk.inertia}/50</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={50}
+                value={rk.inertia}
+                onChange={(e) => patchRocker({ inertia: Number(e.target.value) })}
+                className="w-full accent-indigo-500"
+              />
+            </label>
+          </div>
+        )}
 
-            {rk.mode === RockerMode.CursorPos && (
-              <div className="grid grid-cols-4 gap-2 border-t border-slate-800 pt-3 sm:col-span-2">
+        {rk.mode === RockerMode.CursorPos && (
+          <div className="grid gap-4 rounded-2xl border border-slate-800 bg-slate-900/50 p-4 text-xs sm:grid-cols-12">
+            {/* 迷你 16:9 屏幕范围可视化示意图 */}
+            <div className="flex flex-col items-center justify-center sm:col-span-5">
+              <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-slate-700 bg-slate-950">
+                <div
+                  className="absolute border border-cyan-400/80 bg-cyan-500/15"
+                  style={{
+                    left: `${Math.max(0, centerX - (pctLeft / 2) * scale)}%`,
+                    top: `${Math.max(0, centerY - (pctUp / 2) * scale)}%`,
+                    width: `${Math.min(100, ((pctLeft + pctRight) / 2) * scale)}%`,
+                    height: `${Math.min(100, ((pctUp + pctDown) / 2) * scale)}%`,
+                  }}
+                />
+                <div
+                  className="absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-amber-400"
+                  style={{ left: `${centerX}%`, top: `${centerY}%` }}
+                />
+              </div>
+              <span className="mt-1.5 text-[11px] text-slate-500">蓝色框即摇杆可控制的光标范围</span>
+            </div>
+
+            <div className="space-y-2.5 sm:col-span-7">
+              <div className="grid grid-cols-3 gap-2">
+                <label className="space-y-1">
+                  <span className="text-slate-400">中心 X ({Math.round(centerX)}%)</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={50}
+                    value={rk.inertia}
+                    onChange={(e) => patchRocker({ inertia: Number(e.target.value) })}
+                    className="w-full accent-cyan-400"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-slate-400">中心 Y ({Math.round(centerY)}%)</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={50}
+                    value={rk.nearParam}
+                    onChange={(e) => patchRocker({ nearParam: Number(e.target.value) })}
+                    className="w-full accent-cyan-400"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-slate-400">整体大小 ({rk.farParam}/50)</span>
+                  <input
+                    type="range"
+                    min={1}
+                    max={50}
+                    value={rk.farParam}
+                    onChange={(e) => patchRocker({ farParam: Number(e.target.value) })}
+                    className="w-full accent-cyan-400"
+                  />
+                </label>
+              </div>
+              <div className="grid grid-cols-4 gap-2 border-t border-slate-800 pt-2">
                 {(
                   [
-                    ['上', 'upKey'],
-                    ['下', 'downKey'],
-                    ['左', 'leftKey'],
-                    ['右', 'rightKey'],
+                    ['上', 'upKey', pctUp],
+                    ['下', 'downKey', pctDown],
+                    ['左', 'leftKey', pctLeft],
+                    ['右', 'rightKey', pctRight],
                   ] as const
-                ).map(([lbl, field]) => {
-                  const pct = cursorRangeKeyToPercent(rk[field]);
-                  return (
-                    <label key={field} className="space-y-1">
-                      <span className="text-slate-400">
-                        {lbl}边距 <strong className="text-indigo-300">{pct}%</strong>
-                      </span>
-                      <input
-                        type="range"
-                        min={5}
-                        max={100}
-                        step={5}
-                        value={pct}
-                        onChange={(e) =>
-                          patchRocker({ [field]: percentToCursorRangeKey(Number(e.target.value)) })
-                        }
-                        className="w-full accent-indigo-500"
-                      />
-                    </label>
-                  );
-                })}
+                ).map(([lbl, field, pct]) => (
+                  <label key={field} className="space-y-1">
+                    <span className="text-slate-400">
+                      {lbl} {pct}%
+                    </span>
+                    <input
+                      type="range"
+                      min={5}
+                      max={100}
+                      step={5}
+                      value={pct}
+                      onChange={(e) =>
+                        patchRocker({ [field]: percentToCursorRangeKey(Number(e.target.value)) })
+                      }
+                      className="w-full accent-indigo-500"
+                    />
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 折叠摇杆方向反向与死区微调 */}
+        {rk.mode !== RockerMode.None && (
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/40 text-xs">
+            <button
+              type="button"
+              onClick={() => setShowRockerAdvanced((v) => !v)}
+              className="flex w-full items-center justify-between px-4 py-2.5 font-medium text-slate-300 hover:text-white"
+            >
+              <span>防误触死区（{Math.round((rk.deadzone / 200) * 100)}%）与方向轴反向设置</span>
+              <ChevronDown
+                className={`h-4 w-4 transition-transform ${showRockerAdvanced ? 'rotate-180' : ''}`}
+              />
+            </button>
+            {showRockerAdvanced && (
+              <div className="space-y-3 border-t border-slate-800 p-4">
+                <label className="block space-y-1">
+                  <div className="flex justify-between text-slate-300">
+                    <span>中心防误触死区（范围内推动不响应，防止摇杆轻微漂移）</span>
+                    <span className="font-mono text-indigo-300">
+                      {Math.round((rk.deadzone / 200) * 100)}% ({rk.deadzone}/200)
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={200}
+                    value={rk.deadzone}
+                    onChange={(e) => patchRocker({ deadzone: Number(e.target.value) })}
+                    className="w-full accent-indigo-500"
+                  />
+                </label>
+                <div className="flex flex-wrap gap-4 text-slate-300">
+                  <label className="flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={rk.invertX}
+                      onChange={(e) => patchRocker({ invertX: e.target.checked })}
+                    />
+                    左右反向
+                  </label>
+                  <label className="flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={rk.invertY}
+                      onChange={(e) => patchRocker({ invertY: e.target.checked })}
+                    />
+                    上下反向
+                  </label>
+                  <label className="flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={rk.rotateR90}
+                      onChange={(e) => patchRocker({ rotateR90: e.target.checked })}
+                    />
+                    摇杆方向右旋 90°（横放键盘时用）
+                  </label>
+                </div>
               </div>
             )}
           </div>
@@ -742,10 +956,10 @@ export function KeyEditor() {
     );
   }
 
-  // ==================== 3. 双旋钮 EC1 / EC2（紧凑三向交互式） ====================
+  // ==================== 3. 双旋钮 EC1 / EC2（带快捷场景预设） ====================
   const eIdx = selection.index;
   const ec = keyboardConfig.encoders[eIdx];
-  const title = eIdx === 0 ? '旋钮 1 EC1（最右侧）' : '旋钮 2 EC2（顶部靠中）';
+  const title = eIdx === 0 ? '旋钮 1（最右侧）' : '旋钮 2（顶部靠中）';
 
   const patchEncoder = (patch: Partial<EncoderConfig>) => {
     setKeyboardConfig((prev) => {
@@ -760,19 +974,77 @@ export function KeyEditor() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2.5 border-b border-slate-800 pb-3.5">
-        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500/15 text-amber-300">
-          <RotateCw className="h-5 w-5" />
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3.5">
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500/15 text-amber-300">
+            <RotateCw className="h-5 w-5" />
+          </div>
+          <div>
+            <h2 className="text-base font-semibold text-white">{title}</h2>
+            <p className="text-xs text-slate-400">适合调音量、缩放画面、拖动时间轴或作为 Surface Dial</p>
+          </div>
         </div>
-        <div>
-          <h2 className="text-base font-semibold text-white">{title}</h2>
-          <p className="text-xs text-slate-400">支持音量/缩放快捷键、Surface Dial 轮盘与下压功能</p>
+
+        {/* 一键常用旋钮方案 */}
+        <div className="flex flex-wrap gap-1.5 text-[11px]">
+          <button
+            type="button"
+            onClick={() => {
+              patchEncoder({
+                rotateMode: EncoderRotateMode.KeyOrShortcut,
+                keyMode: AuxKeyMode.KeyOrShortcut,
+                ccwKey: 243,
+                ccwFunc: 0,
+                cwKey: 242,
+                cwFunc: 0,
+                pressKey: 244,
+                pressFunc: 0,
+              });
+              pushToast('success', `${title}已设为「音量调节 + 按下静音」`);
+            }}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-amber-400"
+          >
+            音量 + 静音
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              patchEncoder({
+                rotateMode: EncoderRotateMode.KeyOrShortcut,
+                keyMode: AuxKeyMode.KeyOrShortcut,
+                ccwKey: 241,
+                ccwFunc: 0x01,
+                cwKey: 240,
+                cwFunc: 0x01,
+                pressKey: 39,
+                pressFunc: 0x01,
+              });
+              pushToast('success', `${title}已设为「画面缩放 + 按下重置 100%」`);
+            }}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-amber-400"
+          >
+            画面缩放
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              patchEncoder({
+                rotateMode: EncoderRotateMode.Dial,
+                keyMode: AuxKeyMode.Dial,
+                ...encodeDialRotate(10, 2),
+              });
+              pushToast('success', `${title}已设为「Surface Dial 轮盘」`);
+            }}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-amber-400"
+          >
+            Surface Dial
+          </button>
         </div>
       </div>
 
       <div className="grid gap-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4 sm:grid-cols-2">
         <label className="space-y-1 text-xs">
-          <span className="font-medium text-slate-300">旋转模式</span>
+          <span className="font-medium text-slate-300">旋转时的用途</span>
           <select
             value={ec.rotateMode}
             onChange={(e) =>
@@ -781,19 +1053,19 @@ export function KeyEditor() {
             className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white"
           >
             <option value={EncoderRotateMode.None}>禁用旋转</option>
-            <option value={EncoderRotateMode.KeyOrShortcut}>按键 / 快捷键</option>
-            <option value={EncoderRotateMode.Dial}>Surface Dial 轮盘</option>
+            <option value={EncoderRotateMode.KeyOrShortcut}>按键 / 快捷键（每拧一格触发一次）</option>
+            <option value={EncoderRotateMode.Dial}>Surface Dial 创意轮盘（系统原生滚轮）</option>
           </select>
         </label>
 
         <label className="space-y-1 text-xs">
-          <span className="font-medium text-slate-300">下压模式</span>
+          <span className="font-medium text-slate-300">按下旋钮时的用途</span>
           <select
             value={ec.keyMode}
             onChange={(e) => patchEncoder({ keyMode: Number(e.target.value) as AuxKeyMode })}
             className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white"
           >
-            <option value={AuxKeyMode.None}>禁用下压</option>
+            <option value={AuxKeyMode.None}>禁用按下</option>
             <option value={AuxKeyMode.KeyOrShortcut}>按键 / 快捷键</option>
             <option value={AuxKeyMode.PermSwitch}>永久切换配置层</option>
             <option value={AuxKeyMode.Dial}>Surface Dial 按压</option>
@@ -806,16 +1078,15 @@ export function KeyEditor() {
             checked={ec.invert}
             onChange={(e) => patchEncoder({ invert: e.target.checked })}
           />
-          反转旋转方向
+          反转顺/逆时针方向（觉得拧反了就勾上）
         </label>
       </div>
 
-      {/* Dial 专属参数 */}
       {ec.rotateMode === EncoderRotateMode.Dial && (
         <div className="grid gap-4 rounded-2xl border border-slate-800 bg-slate-900/50 p-4 text-xs sm:grid-cols-2">
           <label className="space-y-1.5">
             <div className="flex justify-between text-slate-300">
-              <span>单格旋转角度</span>
+              <span>每拧一格转动的角度（默认 10°）</span>
               <span className="font-mono text-indigo-300">{dial.angle}°</span>
             </div>
             <input
@@ -828,7 +1099,7 @@ export function KeyEditor() {
             />
           </label>
           <div className="space-y-1.5">
-            <span className="text-slate-300">平滑插值次数</span>
+            <span className="text-slate-300">滚动丝滑度（分几步发送，推荐 2x）</span>
             <div className="grid grid-cols-5 gap-1.5">
               {[1, 2, 3, 4, 5].map((n) => (
                 <button
@@ -867,7 +1138,7 @@ export function KeyEditor() {
               },
               {
                 id: 'press' as const,
-                label: '● 下压按键',
+                label: '● 按下旋钮',
                 val:
                   ec.keyMode === AuxKeyMode.KeyOrShortcut
                     ? formatShortcutCompact(ec.pressKey, ec.pressFunc)
@@ -914,7 +1185,7 @@ export function KeyEditor() {
             usbKey={ec.ccwKey}
             func={ec.ccwFunc}
             allowModifiers
-            label="逆时针旋转 (↶) 绑定功能"
+            label="逆时针旋转 (↶) 触发的按键"
             onChange={(k, f) => patchEncoder({ ccwKey: k, ccwFunc: f })}
           />
         )}
@@ -924,7 +1195,7 @@ export function KeyEditor() {
             usbKey={ec.cwKey}
             func={ec.cwFunc}
             allowModifiers
-            label="顺时针旋转 (↷) 绑定功能"
+            label="顺时针旋转 (↷) 触发的按键"
             onChange={(k, f) => patchEncoder({ cwKey: k, cwFunc: f })}
           />
         )}
@@ -934,14 +1205,14 @@ export function KeyEditor() {
             usbKey={ec.pressKey}
             func={ec.pressFunc}
             allowModifiers
-            label="旋钮下压绑定功能"
+            label="按下旋钮触发的按键"
             onChange={(k, f) => patchEncoder({ pressKey: k, pressFunc: f })}
           />
         )}
 
         {encoderFocus === 'press' && ec.keyMode === AuxKeyMode.PermSwitch && (
           <div className="space-y-2">
-            <span className="text-xs text-slate-300">按下旋钮切换至目标配置层：</span>
+            <span className="text-xs text-slate-300">按下旋钮切换到哪一层？</span>
             <div className="grid grid-cols-8 gap-1.5">
               {Array.from({ length: SLOT_COUNT }, (_, i) => (
                 <button

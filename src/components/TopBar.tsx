@@ -37,6 +37,7 @@ export function TopBar() {
     keyboardConfig,
     setKeyboardConfig,
     isDirty,
+    dirtySlots,
     busyText,
     busyProgress,
     connectWebHid,
@@ -125,13 +126,21 @@ export function TopBar() {
           {isConnected ? (
             <>
               <button
-                onClick={() => void readAllFromDevice(currentSlot)}
+                onClick={() => {
+                  if (
+                    isDirty &&
+                    !window.confirm(`第 ${currentSlot + 1} 层有尚未写入设备的修改，读取将覆盖这些修改，确认继续？`)
+                  ) {
+                    return;
+                  }
+                  void readAllFromDevice(currentSlot);
+                }}
                 disabled={Boolean(busyText)}
-                title="从设备一键读取当前层配置（需新版固件，旧版固件自动恢复本地缓存）"
+                title="从设备手动读取当前层配置（需新版固件，旧版固件自动恢复本地缓存）"
                 className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${busyText ? 'animate-spin' : ''}`} />
-                读取配置
+                读取 L{currentSlot + 1}
               </button>
 
               <button
@@ -215,6 +224,7 @@ export function TopBar() {
               {Array.from({ length: SLOT_COUNT }, (_, i) => {
                 const isEditing = currentSlot === i;
                 const isHardwareActive = deviceActiveSlot === i;
+                const slotDirty = dirtySlots[i];
                 return (
                   <button
                     key={i}
@@ -234,6 +244,12 @@ export function TopBar() {
                       />
                     )}
                     <span>L{i + 1}</span>
+                    {slotDirty && (
+                      <span
+                        className="h-1.5 w-1.5 rounded-full bg-amber-400"
+                        title="此层有未写入设备的修改"
+                      />
+                    )}
                   </button>
                 );
               })}

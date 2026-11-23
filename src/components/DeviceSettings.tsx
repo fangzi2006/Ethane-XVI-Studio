@@ -157,6 +157,9 @@ export function DeviceSettings() {
             </div>
 
             <div className="flex-1 space-y-2.5 text-xs">
+              <div className="rounded-lg border border-slate-800 bg-slate-950/70 px-2.5 py-2 text-[11px] text-slate-400">
+                <strong className="text-slate-200">校准步骤：</strong>① 松手让摇杆回中，点左侧“一键中位校准”；② 若推到底达不到满速，再微调下方极限范围。
+              </div>
               <div className="text-slate-400">
                 当前中位：
                 <strong className="font-mono text-white">

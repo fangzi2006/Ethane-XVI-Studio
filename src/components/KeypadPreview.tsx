@@ -17,12 +17,10 @@ import { useDevice } from '../store/useDeviceStore';
 
 interface KeypadPreviewProps {
   mode: 'keymap' | 'lighting';
-  /** 灯效页仅当工具为“画笔”时才传入刷色回调，避免误涂色 */
   paintMode?: boolean;
   onPaintKey?: (keyIndex: number) => void;
   onSelectLed?: () => void;
   lightingLayer?: 'up' | 'down';
-  useSimulatedLed?: boolean;
 }
 
 function summarizeKey(k: KeyConfig): { badge: string; text: string; muted?: boolean } {
@@ -83,7 +81,6 @@ export function KeypadPreview({
   onPaintKey,
   onSelectLed,
   lightingLayer = 'up',
-  useSimulatedLed = true,
 }: KeypadPreviewProps) {
   const {
     keyboardConfig,
@@ -96,7 +93,7 @@ export function KeypadPreview({
   } = useDevice();
 
   const [tagR, tagG, tagB] = keyboardConfig.systemLed.tagColor;
-  const [simTagR, simTagG, simTagB] = simulateLedRgb(tagR, tagG, tagB);
+  const [glowTagR, glowTagG, glowTagB] = simulateLedRgb(tagR, tagG, tagB);
   const isLighting = mode === 'lighting';
 
   const rockerModes: Record<RockerMode, string> = {
@@ -109,7 +106,7 @@ export function KeypadPreview({
 
   return (
     <div className="flex flex-col items-center">
-      {/* 顶部小工具条：视角旋转 / 模式提示 */}
+      {/* 顶部小工具条 */}
       <div className="mb-2.5 flex w-full max-w-[390px] items-center justify-between text-xs">
         <span className="font-medium text-slate-400">
           {isLighting ? (
@@ -118,7 +115,7 @@ export function KeypadPreview({
                 <Paintbrush className="h-3.5 w-3.5" /> 画笔模式：点击键帽直接涂色
               </span>
             ) : (
-              '点选模式：点击键帽或 LED1 编辑参数'
+              '点选模式：点击键帽或 LED1 单独调色'
             )
           ) : (
             '点击小键盘上的任意部件即可编辑'
@@ -135,20 +132,19 @@ export function KeypadPreview({
             className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 text-[11px] text-slate-300 hover:border-slate-600"
           >
             <RotateCw className="h-3 w-3 text-indigo-400" />
-            方向 {ORIENTATION_SHORT[keyboardConfig.orientation] ?? '0°'}
+            摆放方向 {ORIENTATION_SHORT[keyboardConfig.orientation] ?? '0°'}
           </button>
         )}
       </div>
 
       {/* 小键盘实体外壳 */}
       <div className="relative w-full max-w-[390px] rounded-[28px] border border-slate-700/80 bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 p-4 shadow-2xl shadow-black/60">
-        {/* USB-C 装饰 */}
         <div className="mx-auto -mt-4 mb-3 flex w-16 items-center justify-center gap-1 rounded-b-lg border-x border-b border-slate-700 bg-slate-800/90 py-0.5 text-[10px] font-medium text-slate-400">
           <Usb className="h-2.5 w-2.5" />
           USB
         </div>
 
-        {/* 顶部功能区（严格按 PCB.png：摇杆 RK1 | 旋钮 2 | LED1 | 旋钮 1） */}
+        {/* 顶部功能区（按 PCB.png：摇杆 RK1 | 旋钮 2 | LED1 | 旋钮 1） */}
         <div className="mb-4 grid grid-cols-12 items-center gap-2 rounded-2xl border border-slate-800/90 bg-slate-950/60 p-2.5">
           {/* RK1 摇杆 */}
           <button
@@ -196,30 +192,34 @@ export function KeypadPreview({
             </span>
           </button>
 
-          {/* LED1 系统 RGB 指示灯（任何时候可点，自动跳灯效页系统灯） */}
+          {/* LED1 系统状态灯 */}
           <button
             type="button"
             onClick={() => {
               setSelection({ kind: 'led' });
-              if (!isLighting) {
-                setActiveTab('lighting');
-              }
+              if (!isLighting) setActiveTab('lighting');
               onSelectLed?.();
             }}
-            title="点击配置系统 RGB 指示灯 LED1"
+            title="点击配置系统指示灯 LED1"
             className={`col-span-2 flex flex-col items-center justify-center rounded-xl border py-2.5 transition-all ${
               selection.kind === 'led'
                 ? 'border-fuchsia-400 bg-fuchsia-500/15 ring-2 ring-fuchsia-500/30'
                 : 'border-slate-800 bg-slate-900/70 hover:border-slate-600'
             }`}
+            style={{
+              backgroundColor:
+                tagR + tagG + tagB > 0
+                  ? `rgba(${glowTagR}, ${glowTagG}, ${glowTagB}, 0.16)`
+                  : undefined,
+            }}
           >
             <div
-              className="h-5 w-5 rounded-full border border-white/30 transition-all"
+              className="h-5 w-5 rounded-full border border-white/30"
               style={{
-                backgroundColor: `rgb(${simTagR}, ${simTagG}, ${simTagB})`,
+                backgroundColor: `rgb(${tagR}, ${tagG}, ${tagB})`,
                 boxShadow:
                   tagR + tagG + tagB > 0
-                    ? `0 0 14px 2px rgba(${simTagR}, ${simTagG}, ${simTagB}, 0.8)`
+                    ? `0 0 12px 1px rgba(${glowTagR}, ${glowTagG}, ${glowTagB}, 0.75)`
                     : 'none',
               }}
             />
@@ -249,19 +249,17 @@ export function KeypadPreview({
           </button>
         </div>
 
-        {/* 主体 4x4 机械按键矩阵 K1~K16 */}
+        {/* 主体 4x4 机械按键矩阵 K1~K16（已去除右上角误导性小圆点） */}
         <div className="grid grid-cols-4 gap-2.5">
           {keyboardConfig.keys.map((k, idx) => {
             const isSelected = selection.kind === 'key' && selection.index === idx;
             const isPressedLive = liveInput ? Boolean(liveInput.keyMask & (1 << idx)) : false;
             const summary = summarizeKey(k);
 
-            const rawColor =
+            const [rawR, rawG, rawB] =
               lightingLayer === 'down' ? lightConfig.downColors[idx] : lightConfig.upColors[idx];
-            const [dispR, dispG, dispB] = useSimulatedLed
-              ? simulateLedRgb(rawColor[0], rawColor[1], rawColor[2])
-              : rawColor;
-            const hasLight = rawColor[0] + rawColor[1] + rawColor[2] > 0;
+            const [glowR, glowG, glowB] = simulateLedRgb(rawR, rawG, rawB);
+            const hasLight = rawR + rawG + rawB > 0;
 
             return (
               <button
@@ -279,40 +277,33 @@ export function KeypadPreview({
                   isLighting && paintMode ? 'cursor-crosshair' : 'cursor-pointer'
                 } ${
                   isSelected
-                    ? 'border-indigo-400 bg-slate-800 ring-2 ring-indigo-500/40'
+                    ? 'border-indigo-400 bg-slate-800 ring-2 ring-indigo-500/45'
                     : 'border-slate-700/90 bg-slate-800/80 hover:border-slate-500'
                 }`}
-                style={{
-                  backgroundColor:
-                    isLighting && hasLight
-                      ? `rgba(${dispR}, ${dispG}, ${dispB}, 0.22)`
-                      : undefined,
-                  boxShadow:
-                    isLighting && hasLight
-                      ? `0 0 16px -2px rgba(${dispR}, ${dispG}, ${dispB}, 0.6), inset 0 0 0 1px rgba(${dispR}, ${dispG}, ${dispB}, 0.5)`
-                      : undefined,
-                }}
+                style={
+                  isLighting && hasLight
+                    ? {
+                        // 键帽背景展示物理发光氛围（低亮度也能清晰看出此键已配色）
+                        backgroundColor: `rgba(${glowR}, ${glowG}, ${glowB}, 0.28)`,
+                        borderColor: isSelected ? undefined : `rgba(${glowR}, ${glowG}, ${glowB}, 0.65)`,
+                        boxShadow: `0 0 14px -3px rgba(${glowR}, ${glowG}, ${glowB}, 0.55)`,
+                      }
+                    : undefined
+                }
               >
-                <div className="flex w-full items-center justify-between">
+                <div className="flex w-full items-center justify-start">
                   <span className="font-mono text-[10px] font-semibold text-slate-400">
                     K{idx + 1}
                   </span>
-                  <span
-                    className="h-2 w-2 rounded-full"
-                    style={{
-                      backgroundColor: hasLight
-                        ? `rgb(${dispR}, ${dispG}, ${dispB})`
-                        : 'rgba(100,116,139,0.25)',
-                      boxShadow: hasLight ? `0 0 6px rgba(${dispR}, ${dispG}, ${dispB}, 0.9)` : 'none',
-                    }}
-                  />
                 </div>
 
                 <div className="flex flex-1 items-center justify-center overflow-hidden px-0.5">
                   {isLighting ? (
+                    /* 中心色块保持真实原始 RGB 颜色 */
                     <div
-                      className="h-7 w-7 rounded-lg border border-white/25 shadow-inner"
-                      style={{ backgroundColor: `rgb(${dispR}, ${dispG}, ${dispB})` }}
+                      className="h-7 w-7 rounded-lg border border-white/30 shadow-inner"
+                      style={{ backgroundColor: `rgb(${rawR}, ${rawG}, ${rawB})` }}
+                      title={`真实 RGB(${rawR}, ${rawG}, ${rawB})`}
                     />
                   ) : (
                     <span
@@ -326,7 +317,7 @@ export function KeypadPreview({
                 </div>
 
                 <div className="h-3.5 text-[9px] font-medium text-indigo-300/80">
-                  {isLighting ? `序 ${lightConfig.customOrder[idx]}` : summary.badge}
+                  {isLighting ? (hasLight ? '' : '熄灭') : summary.badge}
                 </div>
               </button>
             );
