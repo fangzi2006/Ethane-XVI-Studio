@@ -1,4 +1,4 @@
-import { CheckCircle2, Info, XCircle, AlertTriangle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Info, XCircle } from 'lucide-react';
 import { useState } from 'react';
 import { DeviceSettings } from './components/DeviceSettings';
 import { KeyEditor } from './components/KeyEditor';
@@ -11,6 +11,8 @@ import { RgbTuple } from './types/config';
 
 function Workspace() {
   const { status, activeTab, setLightConfig, toasts } = useDevice();
+  const [lightSubTab, setLightSubTab] = useState<'keys' | 'sysled'>('keys');
+  const [paintMode, setPaintMode] = useState(false);
   const [lightLayer, setLightLayer] = useState<'up' | 'down'>('up');
   const [brushColor, setBrushColor] = useState<RgbTuple>([0, 110, 140]);
   const [useSimulatedLed, setUseSimulatedLed] = useState(true);
@@ -32,24 +34,35 @@ function Workspace() {
 
       {!isConnected ? (
         <WelcomeScreen />
+      ) : activeTab === 'device' ? (
+        /* 设备校准页：居中 2 列仪表盘布局，不再强行占左侧大键盘空间 */
+        <main className="mx-auto max-w-[1400px] px-4 py-6">
+          <DeviceSettings />
+        </main>
       ) : (
-        <main className="mx-auto grid max-w-[1440px] gap-6 px-4 py-6 lg:grid-cols-12">
-          {/* 左侧：常驻实体小键盘可视化预览 */}
+        /* 键位映射 & 灯效设计页：左侧专属画布 + 右侧聚焦工作区 */
+        <main className="mx-auto grid max-w-[1400px] gap-6 px-4 py-6 lg:grid-cols-12">
           <aside className="lg:col-span-5 xl:col-span-4">
-            <div className="lg:sticky lg:top-24">
+            <div className="lg:sticky lg:top-28">
               <KeypadPreview
-                onPaintKey={activeTab === 'lighting' ? handlePaintKey : undefined}
+                mode={activeTab === 'lighting' ? 'lighting' : 'keymap'}
+                paintMode={paintMode}
+                onPaintKey={handlePaintKey}
+                onSelectLed={() => setLightSubTab('sysled')}
                 lightingLayer={lightLayer}
                 useSimulatedLed={useSimulatedLed}
               />
             </div>
           </aside>
 
-          {/* 右侧：功能工作区 */}
           <section className="rounded-3xl border border-slate-800/90 bg-slate-900/40 p-5 shadow-xl lg:col-span-7 xl:col-span-8">
             {activeTab === 'keymap' && <KeyEditor />}
             {activeTab === 'lighting' && (
               <LightingEditor
+                subTab={lightSubTab}
+                setSubTab={setLightSubTab}
+                paintMode={paintMode}
+                setPaintMode={setPaintMode}
                 layer={lightLayer}
                 setLayer={setLightLayer}
                 brushColor={brushColor}
@@ -58,7 +71,6 @@ function Workspace() {
                 setUseSimulatedLed={setUseSimulatedLed}
               />
             )}
-            {activeTab === 'device' && <DeviceSettings />}
           </section>
         </main>
       )}

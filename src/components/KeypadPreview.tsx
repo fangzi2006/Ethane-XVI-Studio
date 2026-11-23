@@ -1,4 +1,4 @@
-import { Compass, Gamepad2, RotateCw, Usb } from 'lucide-react';
+import { Gamepad2, Paintbrush, RotateCw, Usb } from 'lucide-react';
 import {
   AuxKeyMode,
   EncoderRotateMode,
@@ -16,18 +16,21 @@ import {
 import { useDevice } from '../store/useDeviceStore';
 
 interface KeypadPreviewProps {
-  /** 灯效页刷色回调：如果传入，点击键帽时会触发刷色而非仅选中 */
+  mode: 'keymap' | 'lighting';
+  /** 灯效页仅当工具为“画笔”时才传入刷色回调，避免误涂色 */
+  paintMode?: boolean;
   onPaintKey?: (keyIndex: number) => void;
+  onSelectLed?: () => void;
   lightingLayer?: 'up' | 'down';
   useSimulatedLed?: boolean;
 }
 
-function summarizeKey(k: KeyConfig): { badge: string; text: string } {
+function summarizeKey(k: KeyConfig): { badge: string; text: string; muted?: boolean } {
   switch (k.mode) {
     case KeyMode.None:
-      return { badge: '', text: '未绑定' };
+      return { badge: '', text: '空', muted: true };
     case KeyMode.Single:
-      return { badge: '单键', text: usbKeyToLabel(k.key) };
+      return { badge: '', text: usbKeyToLabel(k.key) };
     case KeyMode.Shortcut:
       return { badge: '快捷', text: formatShortcutCompact(k.key, k.func) };
     case KeyMode.Macro:
@@ -39,27 +42,18 @@ function summarizeKey(k: KeyConfig): { badge: string; text: string } {
     case KeyMode.SwitchSlot: {
       const target = k.func & 0x0f;
       const isTemp = Boolean(k.func & 0x80);
-      return {
-        badge: isTemp ? '临时切' : '永久切',
-        text: `槽位 ${target || 1}`,
-      };
+      return { badge: isTemp ? 'Fn层' : '切层', text: `L${target || 1}` };
     }
     case KeyMode.Clicker:
-      return {
-        badge: k.func ? '自动连点' : '按住连点',
-        text: usbKeyToLabel(k.key),
-      };
+      return { badge: k.func ? '自动连点' : '连点', text: usbKeyToLabel(k.key) };
     case KeyMode.Buzzer:
       return { badge: '音乐', text: '蜂鸣器' };
     case KeyMode.Morse: {
       const sub = k.func & 0x03;
-      return {
-        badge: '电码',
-        text: sub === 0 ? '点 ·' : sub === 1 ? '划 -' : '单键 ·-',
-      };
+      return { badge: '电码', text: sub === 0 ? '点 ·' : sub === 1 ? '划 -' : '点划' };
     }
     default:
-      return { badge: '', text: '--' };
+      return { badge: '', text: '--', muted: true };
   }
 }
 
@@ -69,157 +63,154 @@ function summarizeEncoder(enc: ReturnType<typeof useDevice>['keyboardConfig']['e
     return `Dial ${angle}°`;
   }
   if (enc.rotateMode === EncoderRotateMode.KeyOrShortcut) {
-    return `${formatShortcutCompact(enc.ccwKey, enc.ccwFunc)} / ${formatShortcutCompact(enc.cwKey, enc.cwFunc)}`;
+    return `${formatShortcutCompact(enc.ccwKey, enc.ccwFunc)}/${formatShortcutCompact(enc.cwKey, enc.cwFunc)}`;
   }
   if (enc.keyMode === AuxKeyMode.PermSwitch) {
     const slot = usbKeyToDigit(enc.pressKey);
-    return slot ? `切至槽位 ${slot}` : '永久切换';
+    return slot ? `切 L${slot}` : '切层';
   }
   if (enc.keyMode === AuxKeyMode.KeyOrShortcut) {
     return formatShortcutCompact(enc.pressKey, enc.pressFunc);
   }
-  return '未配置';
+  return '未绑定';
 }
 
-const ORIENTATION_NAMES = ['正常 (USB 朝上)', '右旋 90°', '旋转 180°', '左旋 90°'];
+const ORIENTATION_SHORT = ['0°', '90°', '180°', '270°'];
 
 export function KeypadPreview({
+  mode,
+  paintMode = false,
   onPaintKey,
+  onSelectLed,
   lightingLayer = 'up',
   useSimulatedLed = true,
 }: KeypadPreviewProps) {
   const {
     keyboardConfig,
+    setKeyboardConfig,
     lightConfig,
     selection,
     setSelection,
-    activeTab,
+    setActiveTab,
     liveInput,
-    livePolling,
-    globalParams,
-    status,
-    mockTransportRef,
   } = useDevice();
 
   const [tagR, tagG, tagB] = keyboardConfig.systemLed.tagColor;
   const [simTagR, simTagG, simTagB] = simulateLedRgb(tagR, tagG, tagB);
-
-  // 摇杆实时位置归一化 (-1..1)
-  const rkNormX = liveInput
-    ? Math.max(
-        -1,
-        Math.min(
-          1,
-          (liveInput.rockerX - globalParams.rockerMidX) /
-            Math.max(1, globalParams.rockerMaxX - globalParams.rockerMidX),
-        ),
-      )
-    : 0;
-  const rkNormY = liveInput
-    ? Math.max(
-        -1,
-        Math.min(
-          1,
-          (liveInput.rockerY - globalParams.rockerMidY) /
-            Math.max(1, globalParams.rockerMaxY - globalParams.rockerMidY),
-        ),
-      )
-    : 0;
+  const isLighting = mode === 'lighting';
 
   const rockerModes: Record<RockerMode, string> = {
-    [RockerMode.None]: '关闭',
-    [RockerMode.FourWay]: '4向按键',
-    [RockerMode.EightWay]: '8向按键',
-    [RockerMode.SpeedMouse]: '速度鼠标',
-    [RockerMode.CursorPos]: '光标位置',
-  };
-
-  const handleMockKeyHold = (idx: number, pressed: boolean) => {
-    if (status !== 'mock' || !livePolling || !mockTransportRef.current) return;
-    if (pressed) {
-      mockTransportRef.current.mockLiveInput.keyMask |= 1 << idx;
-    } else {
-      mockTransportRef.current.mockLiveInput.keyMask &= ~(1 << idx);
-    }
+    [RockerMode.None]: '未绑定',
+    [RockerMode.FourWay]: '4向键',
+    [RockerMode.EightWay]: '8向键',
+    [RockerMode.SpeedMouse]: '鼠标',
+    [RockerMode.CursorPos]: '光标区',
   };
 
   return (
     <div className="flex flex-col items-center">
-      {/* 顶部方向提示 */}
-      <div className="mb-3 flex w-full max-w-[400px] items-center justify-between text-xs text-slate-400">
-        <span className="inline-flex items-center gap-1.5">
-          <Compass className="h-3.5 w-3.5 text-indigo-400" />
-          实体 PCB 布局预览
+      {/* 顶部小工具条：视角旋转 / 模式提示 */}
+      <div className="mb-2.5 flex w-full max-w-[390px] items-center justify-between text-xs">
+        <span className="font-medium text-slate-400">
+          {isLighting ? (
+            paintMode ? (
+              <span className="inline-flex items-center gap-1 text-fuchsia-300">
+                <Paintbrush className="h-3.5 w-3.5" /> 画笔模式：点击键帽直接涂色
+              </span>
+            ) : (
+              '点选模式：点击键帽或 LED1 编辑参数'
+            )
+          ) : (
+            '点击小键盘上的任意部件即可编辑'
+          )}
         </span>
-        <span className="rounded-md border border-slate-800 bg-slate-900 px-2 py-0.5 text-[11px] text-slate-300">
-          方向：{ORIENTATION_NAMES[keyboardConfig.orientation] ?? '正常'}
-        </span>
-      </div>
 
-      {/* 小键盘外壳容器 */}
-      <div className="relative w-full max-w-[400px] rounded-[28px] border border-slate-700/80 bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 p-5 shadow-2xl shadow-black/60">
-        {/* 顶部居中 Type-C 接口装饰 */}
-        <div className="mx-auto -mt-5 mb-3 flex w-20 items-center justify-center gap-1 rounded-b-lg border-x border-b border-slate-700 bg-slate-800/90 py-1 text-[10px] font-medium text-slate-400">
-          <Usb className="h-3 w-3" />
-          USB-C
-        </div>
-
-        {/* 顶部功能区：严格按 PCB.png 从左到右 -> 摇杆(RK1) | 旋钮2(EC2) | RGB指示灯(LED1) | 旋钮1(EC1) */}
-        <div className="mb-5 grid grid-cols-12 items-center gap-2 rounded-2xl border border-slate-800/90 bg-slate-950/60 p-3">
-          {/* 1. 摇杆 RK1 (左) */}
+        {!isLighting && (
           <button
             type="button"
+            onClick={() =>
+              setKeyboardConfig((p) => ({ ...p, orientation: (p.orientation + 1) % 4 }))
+            }
+            title="点击切换键盘摆放旋转方向"
+            className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 text-[11px] text-slate-300 hover:border-slate-600"
+          >
+            <RotateCw className="h-3 w-3 text-indigo-400" />
+            方向 {ORIENTATION_SHORT[keyboardConfig.orientation] ?? '0°'}
+          </button>
+        )}
+      </div>
+
+      {/* 小键盘实体外壳 */}
+      <div className="relative w-full max-w-[390px] rounded-[28px] border border-slate-700/80 bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 p-4 shadow-2xl shadow-black/60">
+        {/* USB-C 装饰 */}
+        <div className="mx-auto -mt-4 mb-3 flex w-16 items-center justify-center gap-1 rounded-b-lg border-x border-b border-slate-700 bg-slate-800/90 py-0.5 text-[10px] font-medium text-slate-400">
+          <Usb className="h-2.5 w-2.5" />
+          USB
+        </div>
+
+        {/* 顶部功能区（严格按 PCB.png：摇杆 RK1 | 旋钮 2 | LED1 | 旋钮 1） */}
+        <div className="mb-4 grid grid-cols-12 items-center gap-2 rounded-2xl border border-slate-800/90 bg-slate-950/60 p-2.5">
+          {/* RK1 摇杆 */}
+          <button
+            type="button"
+            disabled={isLighting}
             onClick={() => setSelection({ kind: 'rocker' })}
             className={`col-span-4 flex flex-col items-center rounded-xl border p-2 transition-all ${
-              selection.kind === 'rocker'
-                ? 'border-indigo-500 bg-indigo-500/15 ring-2 ring-indigo-500/30'
-                : 'border-slate-800 bg-slate-900/80 hover:border-slate-600'
+              isLighting
+                ? 'cursor-default border-slate-800/40 bg-slate-900/30 opacity-35'
+                : selection.kind === 'rocker'
+                  ? 'border-indigo-400 bg-indigo-500/15 ring-2 ring-indigo-500/30'
+                  : 'border-slate-800 bg-slate-900/80 hover:border-slate-600'
             }`}
           >
-            <div className="relative flex h-12 w-12 items-center justify-center rounded-full border-2 border-slate-700 bg-slate-950 shadow-inner">
-              <div
-                className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-slate-600 to-slate-800 text-slate-200 shadow-md transition-transform duration-75"
-                style={{
-                  transform: `translate(${rkNormX * 8}px, ${rkNormY * 8}px)`,
-                }}
-              >
+            <div className="flex h-11 w-11 items-center justify-center rounded-full border-2 border-slate-700 bg-slate-950">
+              <div className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-700 text-slate-200">
                 <Gamepad2 className="h-3.5 w-3.5" />
               </div>
             </div>
-            <span className="mt-1.5 text-[11px] font-semibold text-slate-200">摇杆 RK1</span>
-            <span className="truncate max-w-full text-[10px] text-slate-400">
+            <span className="mt-1 text-[11px] font-semibold text-slate-200">摇杆</span>
+            <span className="max-w-full truncate text-[10px] text-slate-400">
               {rockerModes[keyboardConfig.rocker.mode]}
             </span>
           </button>
 
-          {/* 2. 旋钮 2 EC2 (中左) */}
+          {/* EC2 旋钮 */}
           <button
             type="button"
+            disabled={isLighting}
             onClick={() => setSelection({ kind: 'encoder', index: 1 })}
             className={`col-span-3 flex flex-col items-center rounded-xl border p-2 transition-all ${
-              selection.kind === 'encoder' && selection.index === 1
-                ? 'border-indigo-500 bg-indigo-500/15 ring-2 ring-indigo-500/30'
-                : 'border-slate-800 bg-slate-900/80 hover:border-slate-600'
+              isLighting
+                ? 'cursor-default border-slate-800/40 bg-slate-900/30 opacity-35'
+                : selection.kind === 'encoder' && selection.index === 1
+                  ? 'border-indigo-400 bg-indigo-500/15 ring-2 ring-indigo-500/30'
+                  : 'border-slate-800 bg-slate-900/80 hover:border-slate-600'
             }`}
           >
-            <div className="flex h-11 w-11 items-center justify-center rounded-full border-2 border-dashed border-slate-600 bg-gradient-to-b from-slate-700 to-slate-900 shadow-md">
-              <RotateCw className="h-4 w-4 text-slate-300" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-full border-2 border-dashed border-slate-600 bg-slate-800">
+              <RotateCw className="h-3.5 w-3.5 text-slate-300" />
             </div>
-            <span className="mt-1.5 text-[11px] font-semibold text-slate-200">旋钮 2</span>
-            <span className="truncate max-w-full text-[10px] text-slate-400">
+            <span className="mt-1 text-[11px] font-semibold text-slate-200">旋钮 2</span>
+            <span className="max-w-full truncate text-[10px] text-slate-400">
               {summarizeEncoder(keyboardConfig.encoders[1])}
             </span>
           </button>
 
-          {/* 3. 系统 RGB 指示灯 LED1 (中右) */}
+          {/* LED1 系统 RGB 指示灯（任何时候可点，自动跳灯效页系统灯） */}
           <button
             type="button"
-            onClick={() => setSelection({ kind: 'led' })}
-            title="点击配置系统 RGB 状态指示灯"
+            onClick={() => {
+              setSelection({ kind: 'led' });
+              if (!isLighting) {
+                setActiveTab('lighting');
+              }
+              onSelectLed?.();
+            }}
+            title="点击配置系统 RGB 指示灯 LED1"
             className={`col-span-2 flex flex-col items-center justify-center rounded-xl border py-2.5 transition-all ${
               selection.kind === 'led'
-                ? 'border-indigo-500 bg-indigo-500/15 ring-2 ring-indigo-500/30'
-                : 'border-slate-800 bg-slate-900/60 hover:border-slate-600'
+                ? 'border-fuchsia-400 bg-fuchsia-500/15 ring-2 ring-fuchsia-500/30'
+                : 'border-slate-800 bg-slate-900/70 hover:border-slate-600'
             }`}
           >
             <div
@@ -228,34 +219,37 @@ export function KeypadPreview({
                 backgroundColor: `rgb(${simTagR}, ${simTagG}, ${simTagB})`,
                 boxShadow:
                   tagR + tagG + tagB > 0
-                    ? `0 0 14px 2px rgba(${simTagR}, ${simTagG}, ${simTagB}, 0.75)`
+                    ? `0 0 14px 2px rgba(${simTagR}, ${simTagG}, ${simTagB}, 0.8)`
                     : 'none',
               }}
             />
-            <span className="mt-2 text-[10px] font-medium text-slate-300">LED1</span>
+            <span className="mt-1.5 text-[10px] font-medium text-slate-300">LED1</span>
           </button>
 
-          {/* 4. 旋钮 1 EC1 (最右) */}
+          {/* EC1 旋钮 */}
           <button
             type="button"
+            disabled={isLighting}
             onClick={() => setSelection({ kind: 'encoder', index: 0 })}
             className={`col-span-3 flex flex-col items-center rounded-xl border p-2 transition-all ${
-              selection.kind === 'encoder' && selection.index === 0
-                ? 'border-indigo-500 bg-indigo-500/15 ring-2 ring-indigo-500/30'
-                : 'border-slate-800 bg-slate-900/80 hover:border-slate-600'
+              isLighting
+                ? 'cursor-default border-slate-800/40 bg-slate-900/30 opacity-35'
+                : selection.kind === 'encoder' && selection.index === 0
+                  ? 'border-indigo-400 bg-indigo-500/15 ring-2 ring-indigo-500/30'
+                  : 'border-slate-800 bg-slate-900/80 hover:border-slate-600'
             }`}
           >
-            <div className="flex h-11 w-11 items-center justify-center rounded-full border-2 border-dashed border-slate-600 bg-gradient-to-b from-slate-700 to-slate-900 shadow-md">
-              <RotateCw className="h-4 w-4 text-slate-300" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-full border-2 border-dashed border-slate-600 bg-slate-800">
+              <RotateCw className="h-3.5 w-3.5 text-slate-300" />
             </div>
-            <span className="mt-1.5 text-[11px] font-semibold text-slate-200">旋钮 1</span>
-            <span className="truncate max-w-full text-[10px] text-slate-400">
+            <span className="mt-1 text-[11px] font-semibold text-slate-200">旋钮 1</span>
+            <span className="max-w-full truncate text-[10px] text-slate-400">
               {summarizeEncoder(keyboardConfig.encoders[0])}
             </span>
           </button>
         </div>
 
-        {/* 主体 4x4 机械按键矩阵 K1 ~ K16 */}
+        {/* 主体 4x4 机械按键矩阵 K1~K16 */}
         <div className="grid grid-cols-4 gap-2.5">
           {keyboardConfig.keys.map((k, idx) => {
             const isSelected = selection.kind === 'key' && selection.index === idx;
@@ -275,60 +269,55 @@ export function KeypadPreview({
                 type="button"
                 onClick={() => {
                   setSelection({ kind: 'key', index: idx });
-                  if (activeTab === 'lighting' && onPaintKey) {
+                  if (isLighting && paintMode && onPaintKey) {
                     onPaintKey(idx);
                   }
                 }}
-                onMouseDown={() => handleMockKeyHold(idx, true)}
-                onMouseUp={() => handleMockKeyHold(idx, false)}
-                onMouseLeave={() => handleMockKeyHold(idx, false)}
                 className={`group relative flex aspect-square flex-col items-center justify-between rounded-xl border p-2 text-center transition-all select-none ${
                   isPressedLive ? 'keycap-shadow-pressed' : 'keycap-shadow'
                 } ${
+                  isLighting && paintMode ? 'cursor-crosshair' : 'cursor-pointer'
+                } ${
                   isSelected
-                    ? 'border-indigo-400 bg-slate-800/95 ring-2 ring-indigo-500/40'
-                    : isPressedLive
-                      ? 'border-emerald-400 bg-emerald-500/20'
-                      : 'border-slate-700/90 bg-slate-800/80 hover:border-slate-500 hover:bg-slate-800'
+                    ? 'border-indigo-400 bg-slate-800 ring-2 ring-indigo-500/40'
+                    : 'border-slate-700/90 bg-slate-800/80 hover:border-slate-500'
                 }`}
                 style={{
+                  backgroundColor:
+                    isLighting && hasLight
+                      ? `rgba(${dispR}, ${dispG}, ${dispB}, 0.22)`
+                      : undefined,
                   boxShadow:
-                    hasLight && activeTab === 'lighting'
-                      ? `0 0 14px -2px rgba(${dispR}, ${dispG}, ${dispB}, 0.55), inset 0 0 0 1px rgba(${dispR}, ${dispG}, ${dispB}, 0.55)`
+                    isLighting && hasLight
+                      ? `0 0 16px -2px rgba(${dispR}, ${dispG}, ${dispB}, 0.6), inset 0 0 0 1px rgba(${dispR}, ${dispG}, ${dispB}, 0.5)`
                       : undefined,
                 }}
               >
-                {/* 键帽顶部编号 + RGB 灯珠 */}
                 <div className="flex w-full items-center justify-between">
                   <span className="font-mono text-[10px] font-semibold text-slate-400">
                     K{idx + 1}
                   </span>
                   <span
-                    className="h-2 w-2 rounded-full transition-colors"
+                    className="h-2 w-2 rounded-full"
                     style={{
                       backgroundColor: hasLight
                         ? `rgb(${dispR}, ${dispG}, ${dispB})`
                         : 'rgba(100,116,139,0.25)',
-                      boxShadow: hasLight
-                        ? `0 0 6px rgba(${dispR}, ${dispG}, ${dispB}, 0.9)`
-                        : 'none',
+                      boxShadow: hasLight ? `0 0 6px rgba(${dispR}, ${dispG}, ${dispB}, 0.9)` : 'none',
                     }}
                   />
                 </div>
 
-                {/* 中间主标签 */}
                 <div className="flex flex-1 items-center justify-center overflow-hidden px-0.5">
-                  {activeTab === 'lighting' ? (
+                  {isLighting ? (
                     <div
-                      className="h-6 w-6 rounded-md border border-white/20 shadow-inner"
-                      style={{
-                        backgroundColor: `rgb(${dispR}, ${dispG}, ${dispB})`,
-                      }}
+                      className="h-7 w-7 rounded-lg border border-white/25 shadow-inner"
+                      style={{ backgroundColor: `rgb(${dispR}, ${dispG}, ${dispB})` }}
                     />
                   ) : (
                     <span
                       className={`truncate text-xs font-semibold leading-tight ${
-                        k.mode === KeyMode.None ? 'text-slate-500' : 'text-slate-100'
+                        summary.muted ? 'text-slate-500' : 'text-slate-100'
                       }`}
                     >
                       {summary.text}
@@ -336,27 +325,12 @@ export function KeypadPreview({
                   )}
                 </div>
 
-                {/* 底部模式徽章 */}
                 <div className="h-3.5 text-[9px] font-medium text-indigo-300/80">
-                  {activeTab === 'lighting'
-                    ? `#${lightConfig.customOrder[idx]}`
-                    : summary.badge}
+                  {isLighting ? `序 ${lightConfig.customOrder[idx]}` : summary.badge}
                 </div>
               </button>
             );
           })}
-        </div>
-
-        {/* 底部品牌丝印 */}
-        <div className="mt-4 flex items-center justify-between px-1 text-[10px] font-mono text-slate-500">
-          <span>ETHANE-XVI</span>
-          <span>
-            {activeTab === 'lighting'
-              ? '点击键帽应用当前画笔/参数'
-              : livePolling
-                ? '实时输入监控中'
-                : '点击任意部件编辑功能'}
-          </span>
         </div>
       </div>
     </div>

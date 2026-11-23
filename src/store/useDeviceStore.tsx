@@ -64,6 +64,9 @@ interface DeviceContextValue {
   deviceInfo: DeviceInfo | null;
   firmwareVersion: string;
   serialNumber: string;
+  firmwareSupportsReadback: boolean | null;
+  legacyNoticeDismissed: boolean;
+  dismissLegacyNotice: () => void;
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
   selection: SelectionTarget;
@@ -131,6 +134,8 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
   const [deviceInfo, setDeviceInfo] = useState<DeviceInfo | null>(null);
   const [firmwareVersion, setFirmwareVersion] = useState('--');
   const [serialNumber, setSerialNumber] = useState('LOCAL');
+  const [firmwareSupportsReadback, setFirmwareSupportsReadback] = useState<boolean | null>(null);
+  const [legacyNoticeDismissed, setLegacyNoticeDismissed] = useState(false);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('keymap');
   const [selection, setSelection] = useState<SelectionTarget>({ kind: 'key', index: 0 });
@@ -238,10 +243,13 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
           setLightConfigRaw(light);
           saveLocalSlot(uid, 'cfg', targetSlot, cfg);
           saveLocalSlot(uid, 'light', targetSlot, light);
+          setFirmwareSupportsReadback(true);
           setIsDirty(false);
         } catch (err) {
           if (err instanceof InvalidCommandError) {
             usedFallback = true;
+            setFirmwareSupportsReadback(false);
+            setLegacyNoticeDismissed(false);
             const cachedCfg = loadLocalSlot<KeyboardConfig>(uid, 'cfg', targetSlot);
             const cachedLight = loadLocalSlot<LightConfig>(uid, 'light', targetSlot);
             if (cachedCfg) setKeyboardConfigRaw(cachedCfg);
@@ -254,8 +262,8 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
 
         if (usedFallback) {
           pushToast(
-            'info',
-            `已读取设备全局参数（旧版固件暂不支持 Flash 回读，已自动恢复本地槽位 ${targetSlot + 1} 缓存）`,
+            'warning',
+            `当前为旧版固件，不支持从设备直接读取配置（已恢复本地槽位 ${targetSlot + 1} 缓存，如需支持请烧录新版固件）`,
           );
         } else {
           pushToast('success', `已成功从设备读取槽位 ${targetSlot + 1} 的完整配置`);
@@ -316,6 +324,8 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     }
     setFirmwareVersion('--');
     setSerialNumber('LOCAL');
+    setFirmwareSupportsReadback(null);
+    setLegacyNoticeDismissed(false);
     pushToast('info', '已断开设备连接');
   }, [pushToast]);
 
@@ -575,6 +585,9 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         deviceInfo,
         firmwareVersion,
         serialNumber,
+        firmwareSupportsReadback,
+        legacyNoticeDismissed,
+        dismissLegacyNotice: () => setLegacyNoticeDismissed(true),
         activeTab,
         setActiveTab,
         selection,
