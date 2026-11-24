@@ -6,6 +6,7 @@ import {
   LightConfig,
   LiveInputState,
   SLOT_COUNT,
+  SlotMeta,
   createDefaultGlobalParams,
   createDefaultKeyboardConfig,
   createDefaultLightConfig,
@@ -32,7 +33,7 @@ export type SelectionTarget =
   | { kind: 'encoder'; index: 0 | 1 } // 0=EC1(右), 1=EC2(中)
   | { kind: 'led' };
 
-export type ActiveTab = 'keymap' | 'lighting' | 'device';
+export type ActiveTab = 'keymap' | 'lighting' | 'profiles' | 'device';
 
 export interface ToastItem {
   id: number;
@@ -41,6 +42,21 @@ export interface ToastItem {
 }
 
 const STORAGE_PREFIX = 'ethane-xvi-studio-v1';
+
+const DEFAULT_SLOT_NAMES = [
+  '日常效率',
+  '影音媒体',
+  '剪辑创作',
+  '游戏娱乐',
+  '配置层 5',
+  '配置层 6',
+  '配置层 7',
+  '配置层 8',
+];
+
+function createDefaultSlotMetas(): SlotMeta[] {
+  return DEFAULT_SLOT_NAMES.map((name) => ({ name }));
+}
 
 function loadLocalSlot<T>(serial: string, kind: 'cfg' | 'light', slot: number): T | null {
   try {
@@ -59,6 +75,26 @@ function saveLocalSlot(serial: string, kind: 'cfg' | 'light', slot: number, data
   }
 }
 
+function loadSlotMetas(serial: string): SlotMeta[] {
+  try {
+    const raw = localStorage.getItem(`${STORAGE_PREFIX}:${serial}:metas`);
+    if (!raw) return createDefaultSlotMetas();
+    const parsed = JSON.parse(raw) as SlotMeta[];
+    if (!Array.isArray(parsed) || parsed.length !== SLOT_COUNT) return createDefaultSlotMetas();
+    return parsed.map((m, i) => ({ name: m?.name?.trim() || DEFAULT_SLOT_NAMES[i] }));
+  } catch {
+    return createDefaultSlotMetas();
+  }
+}
+
+function saveSlotMetas(serial: string, metas: SlotMeta[]) {
+  try {
+    localStorage.setItem(`${STORAGE_PREFIX}:${serial}:metas`, JSON.stringify(metas));
+  } catch {
+    // ignore quota error
+  }
+}
+
 /**
  * 将单层键盘配置 + 灯效配置生成稳定的二进制签名，用于精确判断“是否真正有改动”。
  * 即使改完后又改回原样，签名也会恢复一致，彻底消除黄点误导。
@@ -69,7 +105,6 @@ function computeSlotSignature(cfg: KeyboardConfig, light: LightConfig): string {
     const lightBytes = encodeLightConfig(light);
     return `${cfgBytes.join(',')}|${lightBytes.join(',')}`;
   } catch {
-    // 当按键区超长(>468B)无法编码时回退到 JSON 签名
     return JSON.stringify({ cfg, light });
   }
 }
@@ -90,6 +125,11 @@ interface DeviceContextValue {
   currentSlot: number; // 0..7
   deviceActiveSlot: number;
   setCurrentSlot: (slot: number) => void;
+
+  slotCfgs: KeyboardConfig[];
+  slotLights: LightConfig[];
+  slotMetas: SlotMeta[];
+  renameSlot: (slot: number, name: string) => void;
 
   keyboardConfig: KeyboardConfig;
   setKeyboardConfig: React.Dispatch<React.SetStateAction<KeyboardConfig>>;
@@ -114,7 +154,20 @@ interface DeviceContextValue {
 
   readAllFromDevice: (slotOverride?: number) => Promise<void>;
   writeAllToDevice: (mode?: 'both' | 'cfg' | 'light') => Promise<void>;
+  writeDirtySlotsToDevice: () => Promise<void>;
   switchDeviceSlot: (slot: number) => Promise<void>;
+
+  copySlotTo: (fromSlot: number, toSlot: number) => void;
+  resetSlot: (slot: number) => void;
+  applyTemplateToSlot: (
+    slot: number,
+    cfg: KeyboardConfig,
+    light: LightConfig,
+    name?: string,
+  ) => void;
+  swapKeysInCurrentSlot: (idxA: number, idxB: number) => void;
+  exportWorkspaceJson: () => string;
+  importWorkspaceJson: (jsonText: string) => void;
 
   applyKeyDebounce: (val: number) => Promise<void>;
   calibrateRockerMid: () => Promise<void>;
@@ -160,11 +213,11 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
   const [currentSlot, setCurrentSlotState] = useState(0);
   const [deviceActiveSlot, setDeviceActiveSlot] = useState(0);
 
-  // 全部 8 个配置层常驻内存，切换层时互不覆盖、绝不丢失未写入修改
   const init = useMemo(() => createInitialSlots(), []);
   const [slotCfgs, setSlotCfgs] = useState<KeyboardConfig[]>(init.cfgs);
   const [slotLights, setSlotLights] = useState<LightConfig[]>(init.lights);
   const [savedSignatures, setSavedSignatures] = useState<string[]>(init.sigs);
+  const [slotMetas, setSlotMetas] = useState<SlotMeta[]>(() => loadSlotMetas('LOCAL'));
 
   const [globalParams, setGlobalParams] = useState<GlobalParams>(() => createDefaultGlobalParams());
   const [diagnostics, setDiagnostics] = useState<DiagnosticData | null>(null);
@@ -195,6 +248,19 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     [slotCfgs, slotLights, savedSignatures],
   );
   const isDirty = dirtySlots[currentSlot];
+
+  const renameSlot = useCallback(
+    (slot: number, name: string) => {
+      const trimmed = name.trim() || DEFAULT_SLOT_NAMES[slot];
+      setSlotMetas((prev) => {
+        const next = [...prev];
+        next[slot] = { name: trimmed };
+        saveSlotMetas(serialNumber, next);
+        return next;
+      });
+    },
+    [serialNumber],
+  );
 
   const setKeyboardConfig: React.Dispatch<React.SetStateAction<KeyboardConfig>> = useCallback(
     (updater) => {
@@ -252,6 +318,7 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         setFirmwareVersion(fw);
         setSerialNumber(uid);
         setGlobalParams(gp);
+        setSlotMetas(loadSlotMetas(uid));
 
         let targetSlot = slotOverride ?? currentSlot;
         let usedFallback = false;
@@ -392,9 +459,6 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     pushToast('info', '已断开设备连接');
   }, [pushToast]);
 
-  /**
-   * 仅切换当前编辑的配置层，不自动从设备覆盖读取，避免意外丢失未保存的修改。
-   */
   const setCurrentSlot = useCallback((slot: number) => {
     const clamped = Math.max(0, Math.min(SLOT_COUNT - 1, slot));
     setCurrentSlotState(clamped);
@@ -443,6 +507,176 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
       }
     },
     [currentSlot, slotCfgs, slotLights, serialNumber, pushToast],
+  );
+
+  const writeDirtySlotsToDevice = useCallback(async () => {
+    const client = clientRef.current;
+    if (!client) {
+      pushToast('warning', '请先连接设备或进入模拟模式');
+      return;
+    }
+    const targets = dirtySlots
+      .map((dirty, idx) => (dirty ? idx : -1))
+      .filter((idx) => idx !== -1);
+    if (targets.length === 0) return;
+
+    setBusyText(`准备同步 ${targets.length} 个配置层...`);
+    setBusyProgress(5);
+    try {
+      for (let i = 0; i < targets.length; i++) {
+        const slot = targets[i];
+        const cfg = slotCfgs[slot];
+        const light = slotLights[slot];
+        const basePct = (i / targets.length) * 100;
+        const spanPct = 100 / targets.length;
+
+        setBusyText(`正在同步 L${slot + 1} 按键配置 (${i + 1}/${targets.length})...`);
+        await client.writeKeyboardConfig(slot, cfg, (p) =>
+          setBusyProgress(Math.round(basePct + (p / 100) * spanPct * 0.65)),
+        );
+        setBusyText(`正在同步 L${slot + 1} 灯效配置 (${i + 1}/${targets.length})...`);
+        await client.writeLightConfig(slot, light, (p) =>
+          setBusyProgress(Math.round(basePct + spanPct * 0.65 + (p / 100) * spanPct * 0.35)),
+        );
+
+        saveLocalSlot(serialNumber, 'cfg', slot, cfg);
+        saveLocalSlot(serialNumber, 'light', slot, light);
+        setSavedSignatures((prev) => {
+          const next = [...prev];
+          next[slot] = computeSlotSignature(cfg, light);
+          return next;
+        });
+      }
+      pushToast('success', `已同步全部 ${targets.length} 个修改的配置层到设备！`);
+    } catch (err) {
+      pushToast('error', `批量同步失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusyText(null);
+      setBusyProgress(null);
+    }
+  }, [dirtySlots, slotCfgs, slotLights, serialNumber, pushToast]);
+
+  const copySlotTo = useCallback(
+    (fromSlot: number, toSlot: number) => {
+      if (fromSlot === toSlot) return;
+      const clonedCfg = decodeKeyboardConfig(encodeKeyboardConfig(slotCfgs[fromSlot]));
+      const clonedLight = decodeLightConfig(encodeLightConfig(slotLights[fromSlot]));
+      setSlotCfgs((prev) => {
+        const next = [...prev];
+        next[toSlot] = clonedCfg;
+        return next;
+      });
+      setSlotLights((prev) => {
+        const next = [...prev];
+        next[toSlot] = clonedLight;
+        return next;
+      });
+      pushToast('success', `已将 L${fromSlot + 1} 的键位与灯效复制到 L${toSlot + 1}（记得写入设备）`);
+    },
+    [slotCfgs, slotLights, pushToast],
+  );
+
+  const resetSlot = useCallback(
+    (slot: number) => {
+      setSlotCfgs((prev) => {
+        const next = [...prev];
+        next[slot] = createDefaultKeyboardConfig();
+        return next;
+      });
+      setSlotLights((prev) => {
+        const next = [...prev];
+        next[slot] = createDefaultLightConfig();
+        return next;
+      });
+      pushToast('info', `已重置 L${slot + 1} 为默认配置`);
+    },
+    [pushToast],
+  );
+
+  const applyTemplateToSlot = useCallback(
+    (slot: number, cfg: KeyboardConfig, light: LightConfig, name?: string) => {
+      setSlotCfgs((prev) => {
+        const next = [...prev];
+        next[slot] = cfg;
+        return next;
+      });
+      setSlotLights((prev) => {
+        const next = [...prev];
+        next[slot] = light;
+        return next;
+      });
+      if (name) {
+        renameSlot(slot, name);
+      }
+      pushToast('success', `已将「${name ?? '场景模板'}」套用到 L${slot + 1}（记得写入设备）`);
+    },
+    [renameSlot, pushToast],
+  );
+
+  const swapKeysInCurrentSlot = useCallback(
+    (idxA: number, idxB: number) => {
+      if (idxA === idxB) return;
+      setKeyboardConfig((prev) => {
+        const nextKeys = [...prev.keys];
+        const temp = nextKeys[idxA];
+        nextKeys[idxA] = nextKeys[idxB];
+        nextKeys[idxB] = temp;
+        return { ...prev, keys: nextKeys };
+      });
+      pushToast('info', `已互换 K${idxA + 1} 与 K${idxB + 1} 的功能`);
+    },
+    [setKeyboardConfig, pushToast],
+  );
+
+  const exportWorkspaceJson = useCallback(() => {
+    const payload = {
+      format: 'ethane-xvi-workspace',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      slots: Array.from({ length: SLOT_COUNT }, (_, i) => ({
+        name: slotMetas[i]?.name || DEFAULT_SLOT_NAMES[i],
+        cfg: Array.from(encodeKeyboardConfig(slotCfgs[i])),
+        light: Array.from(encodeLightConfig(slotLights[i])),
+      })),
+    };
+    return JSON.stringify(payload, null, 2);
+  }, [slotMetas, slotCfgs, slotLights]);
+
+  const importWorkspaceJson = useCallback(
+    (jsonText: string) => {
+      try {
+        const parsed = JSON.parse(jsonText) as {
+          format?: string;
+          slots?: Array<{ name?: string; cfg?: number[]; light?: number[] }>;
+        };
+        if (parsed.format !== 'ethane-xvi-workspace' || !Array.isArray(parsed.slots)) {
+          throw new Error('无效的 Ethane-XVI 全量备份文件');
+        }
+        const nextCfgs = [...slotCfgs];
+        const nextLights = [...slotLights];
+        const nextMetas = [...slotMetas];
+        for (let i = 0; i < Math.min(SLOT_COUNT, parsed.slots.length); i++) {
+          const item = parsed.slots[i];
+          if (Array.isArray(item.cfg) && item.cfg.length === 512) {
+            nextCfgs[i] = decodeKeyboardConfig(new Uint8Array(item.cfg));
+          }
+          if (Array.isArray(item.light) && item.light.length === 256) {
+            nextLights[i] = decodeLightConfig(new Uint8Array(item.light));
+          }
+          if (item.name) {
+            nextMetas[i] = { name: item.name };
+          }
+        }
+        setSlotCfgs(nextCfgs);
+        setSlotLights(nextLights);
+        setSlotMetas(nextMetas);
+        saveSlotMetas(serialNumber, nextMetas);
+        pushToast('success', '已成功恢复 8 层整机备份（请点击“同步全部”写入设备）');
+      } catch (err) {
+        pushToast('error', err instanceof Error ? err.message : '导入整机备份失败');
+      }
+    },
+    [slotCfgs, slotLights, slotMetas, serialNumber, pushToast],
   );
 
   const switchDeviceSlot = useCallback(
@@ -659,6 +893,10 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         currentSlot,
         deviceActiveSlot,
         setCurrentSlot,
+        slotCfgs,
+        slotLights,
+        slotMetas,
+        renameSlot,
         keyboardConfig,
         setKeyboardConfig,
         lightConfig,
@@ -679,7 +917,14 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         disconnect,
         readAllFromDevice,
         writeAllToDevice,
+        writeDirtySlotsToDevice,
         switchDeviceSlot,
+        copySlotTo,
+        resetSlot,
+        applyTemplateToSlot,
+        swapKeysInCurrentSlot,
+        exportWorkspaceJson,
+        importWorkspaceJson,
         applyKeyDebounce,
         calibrateRockerMid,
         applyRockerRange,

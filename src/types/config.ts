@@ -189,7 +189,26 @@ export interface LiveInputState {
   ec1Count: number;
   ec2Count: number;
   keyMask: number; // 16 keys (bit 0..15)
-  auxMask: number; // bit 0=rocker press, bit 1=EC1 press, bit 2=EC2 press
+  auxMask: number; // bit 0 = EC1 按下, bit 1 = EC2 按下, bit 2 = 摇杆按下
+}
+
+export interface SlotMeta {
+  name: string;
+}
+
+export function rgbToHex([r, g, b]: RgbTuple): string {
+  const toHex = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
+}
+
+export function hexToRgb(hex: string): RgbTuple | null {
+  const cleaned = hex.trim().replace(/^#/, '');
+  if (!/^[0-9a-fA-F]{6}$/.test(cleaned)) return null;
+  return [
+    parseInt(cleaned.slice(0, 2), 16),
+    parseInt(cleaned.slice(2, 4), 16),
+    parseInt(cleaned.slice(4, 6), 16),
+  ];
 }
 
 export interface DiagnosticData {

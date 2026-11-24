@@ -14,7 +14,9 @@ import {
   IndicatorSource,
   KEY_NUM,
   RgbTuple,
+  hexToRgb,
   hsvToRgb,
+  rgbToHex,
   rgbToHsv,
 } from '../types/config';
 
@@ -77,6 +79,8 @@ interface LightingEditorProps {
   setLayer: (layer: 'up' | 'down') => void;
   brushColor: RgbTuple;
   setBrushColor: (c: RgbTuple) => void;
+  selectedKeys: Set<number>;
+  onSelectAllKeys: () => void;
 }
 
 export function LightingEditor({
@@ -86,6 +90,8 @@ export function LightingEditor({
   setLayer,
   brushColor,
   setBrushColor,
+  selectedKeys,
+  onSelectAllKeys,
 }: LightingEditorProps) {
   const {
     lightConfig,
@@ -96,9 +102,10 @@ export function LightingEditor({
     pushToast,
   } = useDevice();
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [hexDraft, setHexDraft] = useState('');
   const txtInputRef = useRef<HTMLInputElement>(null);
 
-  // 直接通过左侧点击键帽或 LED1 切换编辑视图，无需顶部冗余切换按钮
+  // 点击左侧 LED1 时直接切换至系统指示灯设置视图
   if (selection.kind === 'led') {
     const led = keyboardConfig.systemLed;
     const patchLed = (patch: Partial<typeof led>) =>
@@ -118,7 +125,6 @@ export function LightingEditor({
           </div>
         </div>
 
-        {/* 1. 状态指示灯三通道（优先展示，与左侧 LED1 显示一致） */}
         <div className="space-y-2.5 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
           <div>
             <div className="text-xs font-semibold text-slate-200">
@@ -184,7 +190,6 @@ export function LightingEditor({
           ))}
         </div>
 
-        {/* 2. 切换配置层时的专属标签颜色（仅在右侧面板内预览） */}
         <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
           <div className="flex items-center justify-between">
             <div>
@@ -261,6 +266,7 @@ export function LightingEditor({
 
   // ==================== 16 键 RGB 背光编辑 ====================
   const selectedKeyIdx = selection.kind === 'key' ? selection.index : 0;
+  const multiTargets = selectedKeys.size > 1 ? Array.from(selectedKeys) : [selectedKeyIdx];
   const activeRgb = paintMode
     ? brushColor
     : layer === 'up'
@@ -272,27 +278,41 @@ export function LightingEditor({
   const shieldPct = Math.round((lightConfig.shieldRemain[selectedKeyIdx] / 255) * 100);
 
   const updateActiveColor = (next: RgbTuple) => {
+    setHexDraft('');
     if (paintMode) {
       setBrushColor(next);
     } else {
       setLightConfig((prev) => {
         const field = layer === 'up' ? 'upColors' : 'downColors';
         const copy = [...prev[field]];
-        copy[selectedKeyIdx] = next;
+        for (const targetIdx of multiTargets) {
+          copy[targetIdx] = next;
+        }
         return { ...prev, [field]: copy };
       });
     }
   };
 
-  const applyColorToAll = () => {
-    setLightConfig((prev) => ({
-      ...prev,
-      [layer === 'up' ? 'upColors' : 'downColors']: Array.from(
-        { length: KEY_NUM },
-        () => [...activeRgb] as RgbTuple,
-      ),
-    }));
-    pushToast('success', `已填充全部 16 键（${layer === 'up' ? '平时颜色' : '按下时的颜色'}）`);
+  const applyGradient = (kind: 'all' | 'horiz' | 'vert' | 'rainbow') => {
+    const field = layer === 'up' ? 'upColors' : 'downColors';
+    let colors: RgbTuple[];
+    if (kind === 'all') {
+      colors = Array.from({ length: KEY_NUM }, () => [...activeRgb] as RgbTuple);
+    } else if (kind === 'horiz') {
+      colors = Array.from({ length: KEY_NUM }, (_, i) =>
+        hsvToRgb((h + (i % 4) * 35) % 360, Math.max(160, s), Math.max(80, v)),
+      );
+    } else if (kind === 'vert') {
+      colors = Array.from({ length: KEY_NUM }, (_, i) =>
+        hsvToRgb((h + Math.floor(i / 4) * 35) % 360, Math.max(160, s), Math.max(80, v)),
+      );
+    } else {
+      colors = Array.from({ length: KEY_NUM }, (_, i) =>
+        hsvToRgb(((Math.floor(i / 4) + (i % 4)) * 45) % 360, 220, Math.max(90, v)),
+      );
+    }
+    setLightConfig((prev) => ({ ...prev, [field]: colors }));
+    pushToast('success', '已生成配色方案');
   };
 
   const handleExportTxt = () => {
@@ -315,12 +335,9 @@ export function LightingEditor({
             <Sparkles className="h-4 w-4 text-fuchsia-400" />
             <h2 className="text-sm font-semibold text-white">动态动画方式</h2>
           </div>
-          <span className="text-[11px] text-slate-400">
-            点击左侧 LED1 可配置顶部状态指示灯
-          </span>
+          <span className="text-[11px] text-slate-400">点击左侧 LED1 可配置顶部状态指示灯</span>
         </div>
 
-        {/* 一级主选项：8 种动画方式卡片 */}
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {WAVE_MODES.map((m) => {
             const active = lightConfig.waveMode === m.id;
@@ -342,7 +359,6 @@ export function LightingEditor({
           })}
         </div>
 
-        {/* 二级子参数区（含移出来的“切层灯效策略”） */}
         <div className="grid gap-3 border-t border-slate-800/80 pt-3.5 text-xs sm:grid-cols-2 lg:grid-cols-3">
           {isFlowMode && (
             <label className="space-y-1">
@@ -432,6 +448,96 @@ export function LightingEditor({
             </label>
           )}
         </div>
+
+        {/* 当选中“自定义顺序(5)”时，直接在此展示 4x4 序号快速编排 */}
+        {lightConfig.waveMode === 5 && (
+          <div className="space-y-2 border-t border-slate-800/80 pt-3 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-fuchsia-300">自定义点亮顺序 (0~15，允许同号同时亮)</span>
+              <button
+                type="button"
+                onClick={() =>
+                  setLightConfig((p) => ({
+                    ...p,
+                    customOrder: Array.from({ length: KEY_NUM }, (_, i) => i),
+                  }))
+                }
+                className="text-[11px] text-slate-400 hover:text-white"
+              >
+                恢复 0~15 顺序
+              </button>
+            </div>
+            <div className="grid grid-cols-4 gap-1.5">
+              {lightConfig.customOrder.map((ord, idx) => (
+                <label
+                  key={idx}
+                  className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 px-2 py-1"
+                >
+                  <span className="font-mono text-[10px] text-slate-400">K{idx + 1}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={15}
+                    value={ord}
+                    onChange={(e) => {
+                      const next = [...lightConfig.customOrder];
+                      next[idx] = Math.max(0, Math.min(15, Number(e.target.value)));
+                      setLightConfig((p) => ({ ...p, customOrder: next }));
+                    }}
+                    className="w-10 bg-transparent text-right font-mono text-white outline-none"
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 当选中“列表循环/随机(6/7)”时，直接在此展示队列编辑 */}
+        {(lightConfig.waveMode === 6 || lightConfig.waveMode === 7) && (
+          <div className="space-y-2 border-t border-slate-800/80 pt-3 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-fuchsia-300">循环 / 随机播放队列</span>
+              <label className="flex items-center gap-1.5 text-slate-300">
+                <span>启用前</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={9}
+                  value={lightConfig.effectListCount}
+                  onChange={(e) =>
+                    setLightConfig((p) => ({
+                      ...p,
+                      effectListCount: Math.max(1, Math.min(9, Number(e.target.value))),
+                    }))
+                  }
+                  className="w-12 rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-white"
+                />
+                <span>项</span>
+              </label>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {lightConfig.effectList.map((modeVal, i) => (
+                <select
+                  key={i}
+                  disabled={i >= lightConfig.effectListCount}
+                  value={modeVal}
+                  onChange={(e) => {
+                    const next = [...lightConfig.effectList];
+                    next[i] = Number(e.target.value);
+                    setLightConfig((p) => ({ ...p, effectList: next }));
+                  }}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-white disabled:opacity-35"
+                >
+                  {SINGLE_WAVE_MODES.map((m, mi) => (
+                    <option key={m} value={mi}>
+                      #{i + 1} {m}
+                    </option>
+                  ))}
+                </select>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ② 按键颜色编辑板块 */}
@@ -446,7 +552,10 @@ export function LightingEditor({
                   !paintMode ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <MousePointer2 className="h-3 w-3" /> 单独改 K{selectedKeyIdx + 1}
+                <MousePointer2 className="h-3 w-3" />
+                {multiTargets.length > 1
+                  ? `已多选 ${multiTargets.length} 键`
+                  : `单独改 K${selectedKeyIdx + 1}`}
               </button>
               <button
                 type="button"
@@ -481,13 +590,13 @@ export function LightingEditor({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 text-xs">
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <button
               type="button"
-              onClick={applyColorToAll}
-              className="rounded-lg bg-indigo-600/20 px-2.5 py-1 font-medium text-indigo-200 hover:bg-indigo-600/30"
+              onClick={onSelectAllKeys}
+              className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300 hover:border-indigo-400"
             >
-              全部设为当前色
+              全选 16 键
             </button>
             <button
               type="button"
@@ -529,6 +638,7 @@ export function LightingEditor({
           </div>
         </div>
 
+        {/* 色块 + Hex 输入 + 梯度生成工具 */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-1.5">
             {PRESET_SWATCHES.map((sw, i) => (
@@ -542,8 +652,21 @@ export function LightingEditor({
               />
             ))}
           </div>
-          <div className="flex items-center gap-2 text-[11px] text-slate-400">
-            <span className="font-mono">RGB({activeRgb.join(', ')})</span>
+
+          <div className="flex items-center gap-2 text-[11px]">
+            <input
+              type="text"
+              value={hexDraft || rgbToHex(activeRgb)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setHexDraft(val);
+                const parsed = hexToRgb(val);
+                if (parsed) updateActiveColor(parsed);
+              }}
+              onBlur={() => setHexDraft('')}
+              className="w-20 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-white"
+              title="输入十六进制色值，如 #FF6600"
+            />
             <span
               className="h-5 w-5 rounded-md border border-white/30"
               style={{ backgroundColor: `rgb(${activeRgb.join(',')})` }}
@@ -611,6 +734,39 @@ export function LightingEditor({
             </label>
           </div>
         </div>
+
+        {/* 快捷批量填充/渐变生成器 */}
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-800 pt-2.5 text-[11px]">
+          <span className="text-slate-500">批量配色生成：</span>
+          <button
+            type="button"
+            onClick={() => applyGradient('all')}
+            className="rounded-md border border-slate-800 bg-slate-950 px-2.5 py-1 text-slate-300 hover:border-indigo-400"
+          >
+            全键同色
+          </button>
+          <button
+            type="button"
+            onClick={() => applyGradient('horiz')}
+            className="rounded-md border border-slate-800 bg-slate-950 px-2.5 py-1 text-slate-300 hover:border-indigo-400"
+          >
+            横向渐变
+          </button>
+          <button
+            type="button"
+            onClick={() => applyGradient('vert')}
+            className="rounded-md border border-slate-800 bg-slate-950 px-2.5 py-1 text-slate-300 hover:border-indigo-400"
+          >
+            纵向渐变
+          </button>
+          <button
+            type="button"
+            onClick={() => applyGradient('rainbow')}
+            className="rounded-md border border-slate-800 bg-slate-950 px-2.5 py-1 text-slate-300 hover:border-fuchsia-400"
+          >
+            对角彩虹
+          </button>
+        </div>
       </div>
 
       {/* ③ 折叠高级灯效细节 */}
@@ -620,7 +776,7 @@ export function LightingEditor({
           onClick={() => setShowAdvanced((s) => !s)}
           className="flex w-full items-center justify-between px-4 py-3 text-xs font-semibold text-slate-300 hover:text-white"
         >
-          <span>高级灯效细节（按下变暗聚焦 / 渐变柔和度 / 间隔与队列）</span>
+          <span>高级灯效细节（按下变暗聚焦 / 渐变柔和度 / 节奏间隔）</span>
           <ChevronDown
             className={`h-4 w-4 transition-transform ${showAdvanced ? 'rotate-180' : ''}`}
           />
@@ -674,27 +830,6 @@ export function LightingEditor({
                       const next = [...lightConfig.shieldRemain];
                       next[selectedKeyIdx] = Number(e.target.value);
                       setLightConfig((p) => ({ ...p, shieldRemain: next }));
-                    }}
-                    className="w-full accent-indigo-500"
-                  />
-                </label>
-
-                <label className="space-y-1">
-                  <div className="flex justify-between text-slate-300">
-                    <span>自定义点亮顺序编号</span>
-                    <span className="font-mono text-indigo-300">
-                      #{lightConfig.customOrder[selectedKeyIdx]}
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={15}
-                    value={lightConfig.customOrder[selectedKeyIdx]}
-                    onChange={(e) => {
-                      const next = [...lightConfig.customOrder];
-                      next[selectedKeyIdx] = Number(e.target.value);
-                      setLightConfig((p) => ({ ...p, customOrder: next }));
                     }}
                     className="w-full accent-indigo-500"
                   />
@@ -843,52 +978,6 @@ export function LightingEditor({
                 </div>
               </label>
             </div>
-
-            {(lightConfig.waveMode === 6 || lightConfig.waveMode === 7) && (
-              <div className="space-y-2 border-t border-slate-800 pt-3">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium text-indigo-300">循环 / 随机灯效队列</span>
-                  <label className="flex items-center gap-1.5 text-slate-300">
-                    <span>启用前</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={9}
-                      value={lightConfig.effectListCount}
-                      onChange={(e) =>
-                        setLightConfig((p) => ({
-                          ...p,
-                          effectListCount: Math.max(1, Math.min(9, Number(e.target.value))),
-                        }))
-                      }
-                      className="w-12 rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-white"
-                    />
-                    <span>项</span>
-                  </label>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  {lightConfig.effectList.map((modeVal, i) => (
-                    <select
-                      key={i}
-                      disabled={i >= lightConfig.effectListCount}
-                      value={modeVal}
-                      onChange={(e) => {
-                        const next = [...lightConfig.effectList];
-                        next[i] = Number(e.target.value);
-                        setLightConfig((p) => ({ ...p, effectList: next }));
-                      }}
-                      className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-white disabled:opacity-35"
-                    >
-                      {SINGLE_WAVE_MODES.map((m, mi) => (
-                        <option key={m} value={mi}>
-                          #{i + 1} {m}
-                        </option>
-                      ))}
-                    </select>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         )}
       </div>

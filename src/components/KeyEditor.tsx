@@ -6,12 +6,15 @@ import {
   Layers,
   ListTree,
   MousePointerClick,
+  Music,
+  Radio,
   Repeat,
   RotateCw,
   Sparkles,
   X,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { BUZZER_KEYMAP, MORSE_REFERENCE } from '../data/presets';
 import {
   AuxKeyMode,
   EncoderConfig,
@@ -35,8 +38,8 @@ import {
 } from '../services/keycodes';
 import { calculateKeySectionSize } from '../services/protocol';
 import { useDevice } from '../store/useDeviceStore';
-import { KeyCaptureInput } from './KeyCaptureInput';
 import { MacroBuilder } from './MacroBuilder';
+import { VirtualKeyboardPicker } from './VirtualKeyboardPicker';
 
 type KeyCategory = 'basic' | 'macro' | 'switch' | 'clicker' | 'extra';
 
@@ -62,7 +65,13 @@ function DraftActionBar({
   onCancel: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2.5">
+    <div
+      className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-2.5 transition ${
+        hasChanges
+          ? 'border-amber-500/40 bg-amber-950/30'
+          : 'border-slate-800 bg-slate-950/80'
+      }`}
+    >
       <span className={`text-xs ${hasChanges ? 'font-medium text-amber-300' : 'text-slate-500'}`}>
         {hasChanges ? '当前有未确认的修改，点击“确认”后才会生效' : '修改选项后请点击“确认”应用到当前键位'}
       </span>
@@ -90,13 +99,17 @@ function DraftActionBar({
   );
 }
 
-export function KeyEditor() {
+interface KeyEditorProps {
+  onDraftKeyPreview?: (preview: { index: number; config: KeyConfig } | null) => void;
+}
+
+export function KeyEditor({ onDraftKeyPreview }: KeyEditorProps) {
   const { selection, currentSlot, keyboardConfig, setKeyboardConfig, pushToast } = useDevice();
   const [rockerFocus, setRockerFocus] = useState<'up' | 'down' | 'left' | 'right' | 'center'>('up');
   const [encoderFocus, setEncoderFocus] = useState<'ccw' | 'press' | 'cw'>('ccw');
   const [showRockerAdvanced, setShowRockerAdvanced] = useState(false);
+  const [showMorseTable, setShowMorseTable] = useState(false);
 
-  // 本地草稿态：切换其他按键/旋钮/摇杆或配置层时自动丢弃未确认的草稿
   const activeKeyIdx = selection.kind === 'key' ? selection.index : 0;
   const activeEncIdx: 0 | 1 = selection.kind === 'encoder' ? selection.index : 0;
 
@@ -108,7 +121,6 @@ export function KeyEditor() {
   const [draftRocker, setDraftRocker] = useState<RockerConfig>(() => ({ ...committedRocker }));
   const [draftEncoder, setDraftEncoder] = useState<EncoderConfig>(() => ({ ...committedEncoder }));
 
-  // 切换选中部件、切换层或外部配置变更时自动同步草稿（放弃未确认修改）
   useEffect(() => {
     setDraftKey(cloneKey(committedKey));
   }, [activeKeyIdx, currentSlot, committedKey]);
@@ -121,6 +133,19 @@ export function KeyEditor() {
     setDraftEncoder({ ...committedEncoder });
   }, [activeEncIdx, selection.kind, currentSlot, committedEncoder]);
 
+  // 同步当前键位草稿到左侧小键盘画布做虚线预览
+  useEffect(() => {
+    if (!onDraftKeyPreview) return;
+    if (
+      (selection.kind === 'key' || selection.kind === 'led') &&
+      JSON.stringify(draftKey) !== JSON.stringify(committedKey)
+    ) {
+      onDraftKeyPreview({ index: activeKeyIdx, config: draftKey });
+    } else {
+      onDraftKeyPreview(null);
+    }
+  }, [draftKey, committedKey, activeKeyIdx, selection.kind, onDraftKeyPreview]);
+
   // ==================== 1. 机械按键 K1~K16 ====================
   if (selection.kind === 'key' || selection.kind === 'led') {
     const idx = activeKeyIdx;
@@ -128,7 +153,6 @@ export function KeyEditor() {
     const category = modeToCategory(keyCfg.mode);
     const hasChanges = JSON.stringify(draftKey) !== JSON.stringify(committedKey);
 
-    // 实时预览应用草稿后的 16 键总字节占用
     const previewKeys = [...keyboardConfig.keys];
     previewKeys[idx] = draftKey;
     const totalKeyBytes = calculateKeySectionSize(previewKeys);
@@ -194,6 +218,9 @@ export function KeyEditor() {
       { id: 'extra', label: '特色扩展', icon: Sparkles },
     ];
 
+    const sw = Math.max(1, keyboardConfig.screenWidth);
+    const sh = Math.max(1, keyboardConfig.screenHeight);
+
     return (
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3.5">
@@ -203,7 +230,7 @@ export function KeyEditor() {
             </div>
             <div>
               <h2 className="text-base font-semibold text-white">按键 K{idx + 1}</h2>
-              <p className="text-xs text-slate-400">编辑完成后请点击下方“确认”应用修改</p>
+              <p className="text-xs text-slate-400">支持物理键盘录制或下方全键盘可视化点选，改完点“确认”</p>
             </div>
           </div>
           <div
@@ -221,7 +248,7 @@ export function KeyEditor() {
           </div>
         </div>
 
-        {/* 5 大直觉分类 */}
+        {/* 5 大分类 */}
         <div className="grid grid-cols-5 gap-1.5 rounded-xl border border-slate-800 bg-slate-950/70 p-1">
           {categories.map((c) => {
             const Icon = c.icon;
@@ -246,45 +273,21 @@ export function KeyEditor() {
 
         <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
           {category === 'basic' && (
-            <div className="space-y-3">
-              <KeyCaptureInput
-                usbKey={keyCfg.mode === KeyMode.None ? 0 : keyCfg.key}
-                func={keyCfg.mode === KeyMode.Shortcut ? keyCfg.func : 0}
-                allowModifiers
-                allowModifierAsMainKey
-                label="按下键盘直接录制（支持单键或 Ctrl/Shift/Alt/Win 组合键）"
-                onChange={handleBasicKeyChange}
-              />
-              <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-800 pt-3 text-[11px]">
-                <span className="text-slate-500">常用一键填入：</span>
-                {[
-                  { label: '复制 Ctrl+C', key: 6, func: 0x01 },
-                  { label: '粘贴 Ctrl+V', key: 25, func: 0x01 },
-                  { label: '撤销 Ctrl+Z', key: 29, func: 0x01 },
-                  { label: '保存 Ctrl+S', key: 22, func: 0x01 },
-                  { label: '切窗 Alt+Tab', key: 43, func: 0x04 },
-                  { label: 'Esc', key: 41, func: 0 },
-                  { label: 'Enter', key: 40, func: 0 },
-                  { label: 'Space', key: 44, func: 0 },
-                ].map((p) => (
-                  <button
-                    key={p.label}
-                    type="button"
-                    onClick={() => handleBasicKeyChange(p.key, p.func)}
-                    className="rounded-md border border-slate-800 bg-slate-950 px-2 py-1 text-slate-300 hover:border-indigo-400 hover:text-white"
-                  >
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <VirtualKeyboardPicker
+              usbKey={keyCfg.mode === KeyMode.None ? 0 : keyCfg.key}
+              func={keyCfg.mode === KeyMode.Shortcut ? keyCfg.func : 0}
+              allowModifiers
+              allowModifierAsMainKey
+              label="点击“键盘录制”敲击按键，或直接在下方虚拟键盘点选"
+              onChange={handleBasicKeyChange}
+            />
           )}
 
           {category === 'macro' && (
             <MacroBuilder
               steps={keyCfg.macro}
-              screenWidth={keyboardConfig.screenWidth}
-              screenHeight={keyboardConfig.screenHeight}
+              screenWidth={sw}
+              screenHeight={sh}
               onChange={(macro) => patchKey({ macro })}
             />
           )}
@@ -349,9 +352,9 @@ export function KeyEditor() {
 
               {isTempSwitch && (
                 <div className="border-t border-slate-800 pt-3">
-                  <KeyCaptureInput
+                  <VirtualKeyboardPicker
                     usbKey={keyCfg.key}
-                    label="轻点复用键（可选：单按一下此键不组合其他键时，额外触发这个单键）"
+                    label="轻点复用单键（可选：单按一下此键未组合其他键时输出）"
                     onChange={(k) => patchKey({ key: k })}
                   />
                 </div>
@@ -361,7 +364,7 @@ export function KeyEditor() {
 
           {category === 'clicker' && (
             <div className="space-y-4">
-              <KeyCaptureInput
+              <VirtualKeyboardPicker
                 usbKey={keyCfg.key}
                 label="选择要自动连点的按键（如鼠标左键或游戏技能键）"
                 onChange={(k) => patchKey({ key: k })}
@@ -443,49 +446,134 @@ export function KeyEditor() {
               </div>
 
               {(keyCfg.mode === KeyMode.CursorClick || keyCfg.mode === KeyMode.CursorMove) && (
-                <div className="space-y-3 border-t border-slate-800 pt-3">
-                  <div className="flex items-center gap-1.5 text-xs text-slate-400">
-                    <MousePointerClick className="h-3.5 w-3.5 text-emerald-400" />
-                    按下后鼠标直接跳至屏幕坐标（按 {keyboardConfig.screenWidth}×{keyboardConfig.screenHeight} 换算）
+                <div className="grid gap-4 border-t border-slate-800 pt-3 sm:grid-cols-12">
+                  {/* 可交互 16:9 屏幕选点画布 */}
+                  <div className="space-y-1.5 sm:col-span-7">
+                    <div className="flex items-center justify-between text-xs text-slate-400">
+                      <span className="inline-flex items-center gap-1">
+                        <MousePointerClick className="h-3.5 w-3.5 text-emerald-400" />
+                        点击小屏幕直接取坐标 ({sw}×{sh})
+                      </span>
+                    </div>
+                    <div
+                      onClick={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const rx = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                        const ry = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+                        patchKey({
+                          x: Math.min(sw - 1, Math.round(rx * sw)),
+                          y: Math.min(sh - 1, Math.round(ry * sh)),
+                        });
+                      }}
+                      className="relative aspect-video w-full cursor-crosshair overflow-hidden rounded-xl border border-slate-700 bg-slate-950"
+                    >
+                      <div className="absolute inset-x-0 top-1/2 h-px bg-slate-800/70" />
+                      <div className="absolute inset-y-0 left-1/2 w-px bg-slate-800/70" />
+                      <div
+                        className="absolute h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-emerald-300 bg-emerald-500/40 shadow-lg"
+                        style={{
+                          left: `${Math.min(100, (keyCfg.x / sw) * 100)}%`,
+                          top: `${Math.min(100, (keyCfg.y / sh) * 100)}%`,
+                        }}
+                      />
+                    </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <label className="space-y-1 text-xs">
-                      <span className="text-slate-300">横向 X 坐标 (px)</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={keyboardConfig.screenWidth - 1}
-                        value={keyCfg.x}
-                        onChange={(e) => patchKey({ x: Math.max(0, Number(e.target.value)) })}
-                        className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white"
-                      />
-                    </label>
-                    <label className="space-y-1 text-xs">
-                      <span className="text-slate-300">纵向 Y 坐标 (px)</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={keyboardConfig.screenHeight - 1}
-                        value={keyCfg.y}
-                        onChange={(e) => patchKey({ y: Math.max(0, Number(e.target.value)) })}
-                        className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white"
-                      />
-                    </label>
+
+                  <div className="flex flex-col justify-between space-y-2 sm:col-span-5">
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="space-y-1 text-xs">
+                        <span className="text-slate-300">X (px)</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={sw - 1}
+                          value={keyCfg.x}
+                          onChange={(e) => patchKey({ x: Math.max(0, Number(e.target.value)) })}
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-white"
+                        />
+                      </label>
+                      <label className="space-y-1 text-xs">
+                        <span className="text-slate-300">Y (px)</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={sh - 1}
+                          value={keyCfg.y}
+                          onChange={(e) => patchKey({ y: Math.max(0, Number(e.target.value)) })}
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-white"
+                        />
+                      </label>
+                    </div>
+                    <div className="space-y-1">
+                      <span className="text-[11px] text-slate-400">快捷九宫格锚点：</span>
+                      <div className="grid grid-cols-3 gap-1 text-[10px]">
+                        {[
+                          ['左上', 0.1, 0.1],
+                          ['上中', 0.5, 0.1],
+                          ['右上', 0.9, 0.1],
+                          ['左中', 0.1, 0.5],
+                          ['正中', 0.5, 0.5],
+                          ['右中', 0.9, 0.5],
+                          ['左下', 0.1, 0.9],
+                          ['下中', 0.5, 0.9],
+                          ['右下', 0.9, 0.9],
+                        ].map(([lbl, px, py]) => (
+                          <button
+                            key={lbl as string}
+                            type="button"
+                            onClick={() =>
+                              patchKey({
+                                x: Math.round((px as number) * sw),
+                                y: Math.round((py as number) * sh),
+                              })
+                            }
+                            className="rounded border border-slate-800 bg-slate-950 py-1 text-slate-300 hover:border-emerald-400"
+                          >
+                            {lbl}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}
 
               {keyCfg.mode === KeyMode.Buzzer && (
-                <p className="border-t border-slate-800 pt-3 text-xs text-slate-300">
-                  按下此键后，16 颗按键会临时变为电子琴键发声（旋钮调音量，按下摇杆或旋钮即可退出）。演奏时请勿写入配置。
-                </p>
+                <div className="space-y-3 border-t border-slate-800 pt-3 text-xs">
+                  <div className="flex items-center gap-2 text-slate-300">
+                    <Music className="h-4 w-4 text-amber-400" />
+                    <span>按下后小键盘进入电子琴模式（旋钮调音量，按下摇杆或旋钮退出；演奏时请勿写入）</span>
+                  </div>
+                  <div className="grid max-w-sm grid-cols-4 gap-1.5">
+                    {BUZZER_KEYMAP.map((noteLbl, ni) => (
+                      <div
+                        key={ni}
+                        className="rounded-lg border border-slate-800 bg-slate-950/80 py-1.5 text-center text-[11px] text-amber-200"
+                      >
+                        <div className="text-[9px] text-slate-500">K{ni + 1}</div>
+                        <div className="font-medium">{noteLbl}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
 
               {keyCfg.mode === KeyMode.Morse && (
                 <div className="space-y-3 border-t border-slate-800 pt-3">
-                  <p className="text-[11px] text-slate-400">
-                    像电报机一样通过长短按输入字母与标点：单键模式靠按住时长区分点/划，双键模式分别绑定一个“点”键和一个“划”键。
-                  </p>
+                  <div className="flex items-center justify-between text-[11px] text-slate-400">
+                    <span className="inline-flex items-center gap-1">
+                      <Radio className="h-3.5 w-3.5 text-indigo-400" />
+                      单键靠按住时长区分点/划，双键分别绑定点键和划键
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowMorseTable((v) => !v)}
+                      className="text-indigo-300 hover:underline"
+                    >
+                      {showMorseTable ? '收起电码表' : '查看电码速查表'}
+                    </button>
+                  </div>
+
                   <div className="grid grid-cols-3 gap-2">
                     {[
                       { val: 2, label: '单键模式 (点+划)' },
@@ -545,13 +633,28 @@ export function KeyEditor() {
                       </label>
                     )}
                   </div>
+
+                  {showMorseTable && (
+                    <div className="grid max-h-44 grid-cols-3 gap-1.5 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950 p-2.5 text-[11px] sm:grid-cols-4">
+                      {MORSE_REFERENCE.map((m) => (
+                        <div
+                          key={m.char}
+                          className={`flex items-center justify-between rounded px-2 py-1 ${
+                            m.isCustom ? 'bg-indigo-950/60 text-indigo-200' : 'bg-slate-900 text-slate-300'
+                          }`}
+                        >
+                          <span className="font-semibold">{m.char}</span>
+                          <span className="font-mono text-[10px] text-slate-400">{m.code}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           )}
         </div>
 
-        {/* 底部确认 / 取消操作条 */}
         <DraftActionBar hasChanges={hasChanges} onConfirm={confirmKey} onCancel={cancelKey} />
       </div>
     );
@@ -613,7 +716,7 @@ export function KeyEditor() {
               <Gamepad2 className="h-5 w-5" />
             </div>
             <div>
-              <h2 className="text-base font-semibold text-white">摇杆 RK1（左上角）</h2>
+              <h2 className="text-base font-semibold text-white">摇杆 RK1</h2>
               <p className="text-xs text-slate-400">编辑完成后请点击下方“确认”应用修改</p>
             </div>
           </div>
@@ -729,7 +832,7 @@ export function KeyEditor() {
 
             {rockerFocus === 'center' ? (
               rk.keyMode === AuxKeyMode.KeyOrShortcut ? (
-                <KeyCaptureInput
+                <VirtualKeyboardPicker
                   usbKey={rk.centerKey}
                   func={rk.centerFunc}
                   allowModifiers
@@ -761,7 +864,7 @@ export function KeyEditor() {
               )
             ) : (
               isKeyMode && (
-                <KeyCaptureInput
+                <VirtualKeyboardPicker
                   usbKey={
                     rockerFocus === 'up'
                       ? rk.upKey
@@ -1051,7 +1154,7 @@ export function KeyEditor() {
   const eIdx = activeEncIdx;
   const ec = draftEncoder;
   const hasChanges = JSON.stringify(draftEncoder) !== JSON.stringify(committedEncoder);
-  const title = eIdx === 0 ? '旋钮 1（最右侧）' : '旋钮 2（顶部靠中）';
+  const title = eIdx === 0 ? '旋钮 1' : '旋钮 2';
 
   const patchEncoder = (patch: Partial<EncoderConfig>) => {
     setDraftEncoder((prev) => ({ ...prev, ...patch }));
@@ -1100,7 +1203,7 @@ export function KeyEditor() {
             }
             className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-amber-400"
           >
-            音量 + 静音
+            音量+静音
           </button>
           <button
             type="button"
@@ -1119,6 +1222,42 @@ export function KeyEditor() {
             className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-amber-400"
           >
             画面缩放
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              patchEncoder({
+                rotateMode: EncoderRotateMode.KeyOrShortcut,
+                keyMode: AuxKeyMode.KeyOrShortcut,
+                ccwKey: 80,
+                ccwFunc: 0,
+                cwKey: 79,
+                cwFunc: 0,
+                pressKey: 44,
+                pressFunc: 0,
+              })
+            }
+            className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-amber-400"
+          >
+            时间轴逐帧
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              patchEncoder({
+                rotateMode: EncoderRotateMode.KeyOrShortcut,
+                keyMode: AuxKeyMode.KeyOrShortcut,
+                ccwKey: 47,
+                ccwFunc: 0,
+                cwKey: 48,
+                cwFunc: 0,
+                pressKey: 5,
+                pressFunc: 0,
+              })
+            }
+            className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-amber-400"
+          >
+            笔刷大小
           </button>
           <button
             type="button"
@@ -1274,7 +1413,7 @@ export function KeyEditor() {
         </div>
 
         {encoderFocus === 'ccw' && ec.rotateMode === EncoderRotateMode.KeyOrShortcut && (
-          <KeyCaptureInput
+          <VirtualKeyboardPicker
             usbKey={ec.ccwKey}
             func={ec.ccwFunc}
             allowModifiers
@@ -1284,7 +1423,7 @@ export function KeyEditor() {
         )}
 
         {encoderFocus === 'cw' && ec.rotateMode === EncoderRotateMode.KeyOrShortcut && (
-          <KeyCaptureInput
+          <VirtualKeyboardPicker
             usbKey={ec.cwKey}
             func={ec.cwFunc}
             allowModifiers
@@ -1294,7 +1433,7 @@ export function KeyEditor() {
         )}
 
         {encoderFocus === 'press' && ec.keyMode === AuxKeyMode.KeyOrShortcut && (
-          <KeyCaptureInput
+          <VirtualKeyboardPicker
             usbKey={ec.pressKey}
             func={ec.pressFunc}
             allowModifiers

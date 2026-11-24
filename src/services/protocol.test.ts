@@ -3,11 +3,13 @@ import {
   AuxKeyMode,
   EncoderRotateMode,
   IndicatorSource,
+  KEY_SECTION_MAX_BYTES,
   KeyMode,
   RockerMode,
   createDefaultKeyboardConfig,
   createDefaultLightConfig,
 } from '../types/config';
+import { SCENARIO_TEMPLATES } from '../data/presets';
 import {
   cursorRangeKeyToPercent,
   decodeDialRotate,
@@ -17,6 +19,7 @@ import {
 import {
   EthaneProtocolClient,
   InvalidCommandError,
+  calculateKeySectionSize,
   decodeKeyboardConfig,
   decodeLightConfig,
   decodeMacroFile,
@@ -213,5 +216,24 @@ describe('MockTransport 与 EthaneProtocolClient 完整通信测试', () => {
 
     await expect(client.readKeyboardConfig(0)).rejects.toBeInstanceOf(InvalidCommandError);
     await expect(client.readLightConfig(0)).rejects.toBeInstanceOf(InvalidCommandError);
+  });
+
+  it('所有场景预设均满足 512B/256B 容量限制并可无损编解码', () => {
+    expect(SCENARIO_TEMPLATES.length).toBe(5);
+    for (const tpl of SCENARIO_TEMPLATES) {
+      const cfg = tpl.buildConfig();
+      const light = tpl.buildLight();
+      expect(calculateKeySectionSize(cfg.keys)).toBeLessThanOrEqual(KEY_SECTION_MAX_BYTES);
+
+      const cfgBytes = encodeKeyboardConfig(cfg);
+      const lightBytes = encodeLightConfig(light);
+      expect(cfgBytes.length).toBe(512);
+      expect(lightBytes.length).toBe(256);
+
+      const decodedCfg = decodeKeyboardConfig(cfgBytes);
+      const decodedLight = decodeLightConfig(lightBytes);
+      expect(encodeKeyboardConfig(decodedCfg)).toEqual(cfgBytes);
+      expect(decodedLight).toEqual(light);
+    }
   });
 });

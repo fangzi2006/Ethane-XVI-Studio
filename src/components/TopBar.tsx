@@ -4,8 +4,10 @@ import {
   Cpu,
   Download,
   FlaskConical,
+  FolderKanban,
   Keyboard,
   Layers,
+  Pencil,
   Plug,
   PlugZap,
   RefreshCw,
@@ -33,6 +35,8 @@ export function TopBar() {
     currentSlot,
     deviceActiveSlot,
     setCurrentSlot,
+    slotMetas,
+    renameSlot,
     switchDeviceSlot,
     keyboardConfig,
     setKeyboardConfig,
@@ -45,6 +49,7 @@ export function TopBar() {
     disconnect,
     readAllFromDevice,
     writeAllToDevice,
+    writeDirtySlotsToDevice,
     importEtcfgBytes,
     exportEtcfgBytes,
     importEtlightBytes,
@@ -55,6 +60,7 @@ export function TopBar() {
   const lightFileRef = useRef<HTMLInputElement>(null);
 
   const isConnected = status === 'connected' || status === 'mock';
+  const dirtyCount = dirtySlots.filter(Boolean).length;
 
   const downloadBlob = (bytes: Uint8Array, filename: string) => {
     const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/octet-stream' });
@@ -67,21 +73,29 @@ export function TopBar() {
   };
 
   const tabs: { id: ActiveTab; label: string; icon: typeof Keyboard }[] = [
-    { id: 'keymap', label: '键位映射', icon: Keyboard },
-    { id: 'lighting', label: '灯效设计', icon: Sparkles },
-    { id: 'device', label: '设备校准', icon: Sliders },
+    { id: 'keymap', label: '键位工作台', icon: Keyboard },
+    { id: 'lighting', label: '灯效工作室', icon: Sparkles },
+    { id: 'profiles', label: '场景与层管理', icon: FolderKanban },
+    { id: 'device', label: '硬件与工具', icon: Sliders },
   ];
+
+  const handleRenamePrompt = (slotIdx: number) => {
+    const next = window.prompt(`为配置层 L${slotIdx + 1} 设置名称：`, slotMetas[slotIdx]?.name ?? '');
+    if (next !== null) {
+      renameSlot(slotIdx, next);
+    }
+  };
 
   return (
     <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-slate-950/95 backdrop-blur-md">
       {/* 第一行：主导航与读写操作 */}
-      <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-2.5">
+      <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-3 px-4 py-2.5">
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-cyan-500 text-white shadow-md shadow-indigo-500/20">
             <Cpu className="h-4 w-4" />
           </div>
           <div className="flex items-center gap-2">
-            <h1 className="text-sm font-bold tracking-tight text-white">Ethane-XVI</h1>
+            <h1 className="text-sm font-bold tracking-tight text-white">Ethane-XVI Studio</h1>
             {status === 'connected' && (
               <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -99,7 +113,7 @@ export function TopBar() {
 
         {/* 主功能切换 */}
         {isConnected && (
-          <nav className="flex items-center gap-1 rounded-xl border border-slate-800 bg-slate-900 p-1">
+          <nav className="flex flex-wrap items-center gap-1 rounded-xl border border-slate-800 bg-slate-900 p-1">
             {tabs.map((t) => {
               const Icon = t.icon;
               const active = activeTab === t.id;
@@ -107,7 +121,7 @@ export function TopBar() {
                 <button
                   key={t.id}
                   onClick={() => setActiveTab(t.id)}
-                  className={`flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-all ${
+                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
                     active
                       ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/30'
                       : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
@@ -129,7 +143,9 @@ export function TopBar() {
                 onClick={() => {
                   if (
                     isDirty &&
-                    !window.confirm(`第 ${currentSlot + 1} 层有尚未写入设备的修改，读取将覆盖这些修改，确认继续？`)
+                    !window.confirm(
+                      `第 ${currentSlot + 1} 层有尚未写入设备的修改，读取将覆盖这些修改，确认继续？`,
+                    )
                   ) {
                     return;
                   }
@@ -149,16 +165,27 @@ export function TopBar() {
                 className="relative inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-md shadow-indigo-600/25 transition hover:bg-indigo-500 disabled:opacity-50"
               >
                 <Save className="h-3.5 w-3.5" />
-                写入第 {currentSlot + 1} 层
+                写入 L{currentSlot + 1}
                 {isDirty && (
                   <span
                     className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-amber-400 ring-2 ring-slate-950"
-                    title="有未写入设备的修改"
+                    title="当前层有未写入设备的修改"
                   />
                 )}
               </button>
 
-              <div className="hidden items-center gap-1 border-l border-slate-800 pl-2 lg:flex">
+              {dirtyCount > 1 && (
+                <button
+                  onClick={() => void writeDirtySlotsToDevice()}
+                  disabled={Boolean(busyText)}
+                  title="将所有已修改的配置层一次性同步到设备"
+                  className="inline-flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-500/15 px-2.5 py-1.5 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/25 disabled:opacity-50"
+                >
+                  同步全部 ({dirtyCount})
+                </button>
+              )}
+
+              <div className="hidden items-center gap-1 border-l border-slate-800 pl-2 xl:flex">
                 <button
                   onClick={() =>
                     activeTab === 'lighting'
@@ -212,10 +239,10 @@ export function TopBar() {
         </div>
       </div>
 
-      {/* 第二行：统一配置层切换条（仅在键位映射与灯效设计页显示） */}
-      {isConnected && activeTab !== 'device' && (
+      {/* 第二行：配置层丝带（仅在键位工作台与灯效工作室显示） */}
+      {isConnected && (activeTab === 'keymap' || activeTab === 'lighting') && (
         <div className="border-t border-slate-800/70 bg-slate-900/60">
-          <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-2 px-4 py-1.5 text-xs">
+          <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-2 px-4 py-1.5 text-xs">
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="mr-1 inline-flex items-center gap-1 text-[11px] font-medium text-slate-400">
                 <Layers className="h-3.5 w-3.5 text-indigo-400" />
@@ -225,12 +252,15 @@ export function TopBar() {
                 const isEditing = currentSlot === i;
                 const isHardwareActive = deviceActiveSlot === i;
                 const slotDirty = dirtySlots[i];
+                const slotName = slotMetas[i]?.name ?? `L${i + 1}`;
                 return (
                   <button
                     key={i}
                     type="button"
                     disabled={Boolean(busyText)}
                     onClick={() => setCurrentSlot(i)}
+                    onDoubleClick={() => handleRenamePrompt(i)}
+                    title={`L${i + 1} · ${slotName}（双击可重命名）`}
                     className={`relative flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
                       isEditing
                         ? 'border-indigo-400 bg-indigo-600/25 text-white'
@@ -244,6 +274,11 @@ export function TopBar() {
                       />
                     )}
                     <span>L{i + 1}</span>
+                    {isEditing && (
+                      <span className="hidden max-w-[72px] truncate text-[11px] text-indigo-200 sm:inline">
+                        · {slotName}
+                      </span>
+                    )}
                     {slotDirty && (
                       <span
                         className="h-1.5 w-1.5 rounded-full bg-amber-400"
@@ -253,6 +288,14 @@ export function TopBar() {
                   </button>
                 );
               })}
+              <button
+                type="button"
+                onClick={() => handleRenamePrompt(currentSlot)}
+                title="重命名当前配置层"
+                className="rounded-md p-1 text-slate-500 hover:bg-slate-800 hover:text-slate-300"
+              >
+                <Pencil className="h-3 w-3" />
+              </button>
             </div>
 
             <div className="flex items-center gap-2">
@@ -263,20 +306,18 @@ export function TopBar() {
                   className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20"
                 >
                   <Check className="h-3 w-3" />
-                  让键盘立即切换至 L{currentSlot + 1}
+                  让键盘切换至 L{currentSlot + 1}
                 </button>
               ) : (
                 <span className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1 text-[11px] text-emerald-400">
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                  键盘当前生效中
+                  硬件生效中
                 </span>
               )}
 
               <button
                 type="button"
-                onClick={() =>
-                  setKeyboardConfig((p) => ({ ...p, priority: !p.priority }))
-                }
+                onClick={() => setKeyboardConfig((p) => ({ ...p, priority: !p.priority }))}
                 title="勾选后，小键盘上电启动将默认优先激活本配置层"
                 className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
                   keyboardConfig.priority
@@ -294,10 +335,10 @@ export function TopBar() {
         </div>
       )}
 
-      {/* 旧版固件不支持直接读取配置的明确提示横幅 */}
+      {/* 旧版固件提示横幅 */}
       {isConnected && firmwareSupportsReadback === false && !legacyNoticeDismissed && (
         <div className="border-t border-amber-500/30 bg-amber-950/60 px-4 py-2">
-          <div className="mx-auto flex max-w-[1400px] items-center justify-between gap-3 text-xs text-amber-200">
+          <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-3 text-xs text-amber-200">
             <div className="flex items-center gap-2">
               <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
               <span>
@@ -320,7 +361,7 @@ export function TopBar() {
       {/* 传输进度条 */}
       {busyText && (
         <div className="border-t border-slate-800 bg-slate-900/95 px-4 py-1.5">
-          <div className="mx-auto flex max-w-[1400px] items-center gap-3 text-xs text-indigo-300">
+          <div className="mx-auto flex max-w-[1440px] items-center gap-3 text-xs text-indigo-300">
             <span className="shrink-0">{busyText}</span>
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800">
               <div
@@ -328,7 +369,9 @@ export function TopBar() {
                 style={{ width: `${busyProgress ?? 30}%` }}
               />
             </div>
-            {busyProgress !== null && <span className="font-mono text-slate-400">{busyProgress}%</span>}
+            {busyProgress !== null && (
+              <span className="font-mono text-slate-400">{busyProgress}%</span>
+            )}
           </div>
         </div>
       )}
