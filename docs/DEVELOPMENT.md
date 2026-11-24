@@ -1,6 +1,6 @@
-# Ethane-XVI 网页版上位机开发与通信协议文档
+# Ethane-XVI Studio 桌面版开发与通信协议文档
 
-本文档基于原 `Ethane-XVI-QT` C++/Qt 上位机、`Ethane-XVI上位机说明.pdf` 及 `Ethane-XVI-CH549` 固件源码逆向整理，包含硬件布局、USB Custom HID 通信协议（含扩展的 Flash 回读指令）、二进制数据结构定义以及重构后的前端分层架构说明。
+本文档基于原 `Ethane-XVI-QT` C++/Qt 上位机、`Ethane-XVI上位机说明.pdf` 及 `Ethane-XVI-CH549` 固件源码整理，包含硬件布局、USB Custom HID 通信协议（含扩展的 Flash 回读与 `RBSY` 忙保护机制）、二进制数据结构定义以及 **Tauri v2 + Rust (`hidapi`) + React** 分层架构说明。
 
 ---
 
@@ -31,23 +31,24 @@ Ethane-XVI 是基于 WCH CH549 主控的复合 HID 编程小键盘，根据 `PCB
 | Interface 0 | EP2 IN | `0x01` / `0x0C` / `0x0D` | 22B | 主 HID（键盘、鼠标、媒体控制、Surface Dial） |
 | Interface 1 | EP3 IN | `0x0D` | 7B | 触摸屏 HID（绝对坐标光标移位/点击） |
 | Interface 2 | EP4 IN/OUT | `0xFF01` | 64B | RGB Custom HID（SignalRGB 实时灯效帧 `0xA5 0x5A 0x03 ...`） |
-| **Interface 3** | **EP1 IN/OUT** | **`0xFF00`** | **64B** | **上位机配置与控制 Custom HID（WebHID 使用 `reportId = 0`）** |
+| **Interface 3** | **EP1 IN/OUT** | **`0xFF00`** | **64B** | **上位机配置与控制 Custom HID（Windows `hidapi` 写入前置 `0x00` Report ID，共 65B）** |
 
 ---
 
 ## 3. Custom HID 通信协议（UsagePage `0xFF00`）
 
-通信采用**请求-响应（Command-Response）**模式，单包固定 **64 字节**（WebHID 下无需像 hidapi 那样手动前置 0 字节 Report ID，直接 `sendReport(0, buf64)` 即可）。
+通信采用**请求-响应（Command-Response）**模式，单包有效载荷固定 **64 字节**（Rust `hidapi` 后端在 Windows 下发送前自动前置 `0x00` Report ID 拼为 65B，读取时自动剥离首字节 `0x00`）。
 - 非法命令统一回复：`['R', 'I', 'N', 'V', ...]`
+- 固件忙保护回复：`['R', 'B', 'S', 'Y', ...]`（当 CH549 主循环正在执行异步 Flash 擦写 `asyncFlag != 0` 时，USB 中断拒绝新命令以保护共享缓冲区 `FlashBuf[512]`；上位机协议层 `transactCommand` 收到 `RBSY` 后自动间隔 `15ms` 重试，最多 30 次）
 - 合法命令响应头部：首字节为 `'R'`，第 1~3 字节原样回显请求命令字。
 - 多字节整型（`u16` / `u32`）在 CH549（8051 内核）与协议中均采用 **大端字节序（Big-Endian）**。
 
-### 3.1 配置写入命令（多包传输）
+### 3.1 配置写入命令（多包传输与写入校验）
 
 | 命令 | 请求包格式 | 响应与后续流程 |
 | :--- | :--- | :--- |
-| 键盘配置写入 | `'D','K','B','C', slot('1'..'8')` | 收到 `'R','K','B','C'` 后，分 **8 包**（每包 64B，间隔 ≥ 5ms）发送 512B；每包回复 `'R','D', idx(0..7)` |
-| 灯效配置写入 | `'D','L','T','C', slot('1'..'8')` | 收到 `'R','L','T','C'` 后，分 **4 包**（每包 64B，间隔 ≥ 5ms）发送 256B；每包回复 `'R','D', idx(0..3)` |
+| 键盘配置写入 | `'D','K','B','C', slot('1'..'8')` | 收到 `'R','K','B','C'` 后，分 **8 包**（每包 64B，间隔 `2ms`）发送 512B；每包回复 `'R','D', idx(0..7)`；末包后短暂等待 `30ms` 并依赖 `RBSY` 自动同步落盘，随后执行 `BRKC` 逐字节回读校验 |
+| 灯效配置写入 | `'D','L','T','C', slot('1'..'8')` | 收到 `'R','L','T','C'` 后，分 **4 包**（每包 64B，间隔 `2ms`）发送 256B；每包回复 `'R','D', idx(0..3)`；末包后短暂等待 `20ms` 并依赖 `RBSY` 自动同步落盘，随后执行 `BRLC` 逐字节回读校验 |
 
 ### 3.2 配置回读命令（方案 B 扩展，兼容旧固件自动降级）
 
@@ -138,29 +139,37 @@ Ethane-XVI 是基于 WCH CH549 主控的复合 HID 编程小键盘，根据 `PCB
 
 ---
 
-## 5. 前端重构架构与 Tauri 迁移指南
+## 5. Tauri v2 + Rust 桌面端架构
 
-```
-ethane-xvi-web/
-├── docs/DEVELOPMENT.md          # 本开发文档
-├── src/
-│   ├── services/
-│   │   ├── transport.ts         # 通信传输层：ITransport 接口 + WebHidTransport + MockTransport
-│   │   ├── protocol.ts          # 协议层：命令收发队列 + 512B/256B/257B 编解码
-│   │   ├── keycodes.ts          # USB HID 键值 <-> Web KeyboardEvent.code <-> 友好显示名
-│   │   └── protocol.test.ts     # Vitest 自动化测试（编解码回环 + MockTransport 协议栈测试）
-│   ├── types/
-│   │   └── config.ts            # 领域数据模型（KeyboardConfig, LightConfig, GlobalParams 等）
-│   ├── store/
-│   │   └── useDeviceStore.ts    # 状态管理（连接状态、8套槽位、本地持久化、读写操作）
-│   └── components/
-│       ├── TopBar.tsx           # 顶部导航与连接/读写控制栏
-│       ├── KeypadPreview.tsx    # 按 PCB.png 1:1 排布的可视化小键盘交互预览
-│       ├── KeyEditor.tsx        # 按键/摇杆/旋钮属性编辑器（含 Dial & 光标位置人性化表单）
-│       ├── MacroBuilder.tsx     # 可视化宏（按键组）积木编辑器
-│       ├── LightingEditor.tsx   # 灯效与调色盘设计器（含低亮度仿真预览）
-│       └── DeviceSettings.tsx   # 系统设置、可视化摇杆校准、实时输入监控、诊断与蜂鸣器试音
+```text
+Ethane-XVI-Studio/
+├── docs/DEVELOPMENT.md              # 本开发与协议文档
+├── src-tauri/
+│   ├── Cargo.toml                   # Rust 依赖：tauri 2, hidapi 2, dialog, fs
+│   ├── tauri.conf.json              # 窗口配置、图标与 Windows NSIS 打包配置
+│   ├── capabilities/default.json    # Tauri v2 最小权限声明（dialog / fs write）
+│   └── src/lib.rs                   # 原生 HID 驱动：单线程直通/批量收发与热拔出检测
+└── src/
+    ├── services/
+    │   ├── transport.ts             # ITransport 接口 + TauriHidTransport + MockTransport
+    │   ├── protocol.ts              # 命令串行队列、写锁、RBSY 重试、512B/256B/257B 编解码与回读校验
+    │   ├── keycodes.ts              # USB HID 键值 <-> Web KeyboardEvent.code <-> 友好显示名
+    │   └── protocol.test.ts         # Vitest 自动化测试（编解码回环、预设、并发写锁）
+    ├── types/config.ts              # 领域数据模型（KeyboardConfig, LightConfig, GlobalParams 等）
+    ├── data/presets.ts              # 精选 3 套高频场景模板、蜂鸣器音阶与摩斯码数据
+    ├── utils/saveFile.ts            # Tauri 原生 Windows「另存为」保存对话框封装
+    ├── store/useDeviceStore.tsx     # 状态管理（启动静默连接、8 层字节快照脏检测、同步读写互斥锁）
+    └── components/
+        ├── TopBar.tsx               # 顶部四工作台导航、单层/整机读取、同步全部与导入导出
+        ├── KeypadPreview.tsx        # 1:1 物理布局、真实桌面旋转、拖拽换键与前端实时灯效预览
+        ├── KeyEditor.tsx            # 按键/摇杆/旋钮草稿编辑器（确认/取消机制）
+        ├── VirtualKeyboardPicker.tsx # 可视化虚拟键盘选键器 + 实体键盘录制
+        ├── MacroBuilder.tsx         # 积木式宏编辑器（真实间隔录制、收藏库、255B 容量条）
+        ├── LightingEditor.tsx       # 三段式灯效工作室（动态方式 → 颜色编辑 → 高级细节）
+        ├── ProfileManager.tsx       # 8 层总览、场景模板库与 .ethane.json 全量备份
+        └── DeviceSettings.tsx       # 19 路实时测试仪、摇杆自动极值校准、蜂鸣器钢琴与中文诊断面板
 ```
 
-### 后续迁移至 Tauri (Rust) 的零侵入替换路径
-只需在 `src/services/transport.ts` 中新增 `TauriHidTransport implements ITransport`，内部通过 `@tauri-apps/api/core` 的 `invoke('hid_connect' / 'hid_send' / 'hid_disconnect')` 与 `listen('hid_receive', ...)` 对接 Rust `hidapi` crate，协议层与所有 React 组件**无需任何修改**。
+### Rust 后端高性能收发设计（`src-tauri/src/lib.rs`）
+- **单所有权直通线程**：打开设备后由专用后台线程独占 `HidDevice`，空闲时阻塞在 `mpsc::Receiver::recv()`（零 CPU 占用），收到请求后 0ms 延迟立即 `write` + `read_timeout`，彻底规避 Windows 15.6ms 定时器粒度造成的轮询空等。
+- **批量事务指令（`hid_transact_batch`）**：`BRKC`（16 包）与 `BRLC`（8 包）各合并为单次 Rust IPC，在原生线程内紧贴 CH549 的 `1ms` USB 轮询周期连续收发，整机 8 层 IPC 往返从 192 次降至 16 次。

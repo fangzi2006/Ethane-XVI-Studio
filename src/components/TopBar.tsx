@@ -18,9 +18,10 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActiveTab, useDevice } from '../store/useDeviceStore';
 import { SLOT_COUNT } from '../types/config';
+import { saveFileWithPicker } from '../utils/saveFile';
 
 export function TopBar() {
   const {
@@ -44,10 +45,11 @@ export function TopBar() {
     dirtySlots,
     busyText,
     busyProgress,
-    connectWebHid,
+    connectDevice,
     connectMock,
     disconnect,
     readAllFromDevice,
+    readFullDeviceConfig,
     writeAllToDevice,
     writeDirtySlotsToDevice,
     importEtcfgBytes,
@@ -58,18 +60,48 @@ export function TopBar() {
 
   const cfgFileRef = useRef<HTMLInputElement>(null);
   const lightFileRef = useRef<HTMLInputElement>(null);
+  const readGroupRef = useRef<HTMLDivElement>(null);
+  const [confirmRead, setConfirmRead] = useState<'single' | 'all' | null>(null);
 
   const isConnected = status === 'connected' || status === 'mock';
-  const dirtyCount = dirtySlots.filter(Boolean).length;
+  const dirtySlotLabels = dirtySlots
+    .map((dirty, idx) => (dirty ? `L${idx + 1}` : null))
+    .filter((label): label is string => label !== null);
+  const dirtyCount = dirtySlotLabels.length;
 
-  const downloadBlob = (bytes: Uint8Array, filename: string) => {
-    const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+  useEffect(() => {
+    if (!confirmRead) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (readGroupRef.current && !readGroupRef.current.contains(e.target as Node)) {
+        setConfirmRead(null);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setConfirmRead(null);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [confirmRead]);
+
+  useEffect(() => {
+    setConfirmRead(null);
+  }, [currentSlot, status]);
+
+  const exportLayerFile = async () => {
+    const isLight = activeTab === 'lighting';
+    const bytes = isLight ? exportEtlightBytes() : exportEtcfgBytes();
+    await saveFileWithPicker(bytes, {
+      suggestedName: isLight
+        ? `ethane-layer${currentSlot + 1}.etlight`
+        : `ethane-layer${currentSlot + 1}.etcfg`,
+      description: isLight ? 'Ethane-XVI 灯效配置文件' : 'Ethane-XVI 键位配置文件',
+      mimeType: 'application/octet-stream',
+      extensions: [isLight ? '.etlight' : '.etcfg'],
+    });
   };
 
   const tabs: { id: ActiveTab; label: string; icon: typeof Keyboard }[] = [
@@ -139,25 +171,81 @@ export function TopBar() {
         <div className="flex items-center gap-2">
           {isConnected ? (
             <>
-              <button
-                onClick={() => {
-                  if (
-                    isDirty &&
-                    !window.confirm(
-                      `第 ${currentSlot + 1} 层有尚未写入设备的修改，读取将覆盖这些修改，确认继续？`,
-                    )
-                  ) {
-                    return;
-                  }
-                  void readAllFromDevice(currentSlot);
-                }}
-                disabled={Boolean(busyText)}
-                title="从设备手动读取当前层配置（需新版固件，旧版固件自动恢复本地缓存）"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
-              >
-                <RefreshCw className={`h-3.5 w-3.5 ${busyText ? 'animate-spin' : ''}`} />
-                读取 L{currentSlot + 1}
-              </button>
+              <div ref={readGroupRef} className="relative flex items-center gap-1.5">
+                <button
+                  onClick={() => {
+                    if (isDirty) {
+                      setConfirmRead((prev) => (prev === 'single' ? null : 'single'));
+                      return;
+                    }
+                    setConfirmRead(null);
+                    void readAllFromDevice(currentSlot);
+                  }}
+                  disabled={Boolean(busyText)}
+                  title="从设备读取当前层配置（旧版固件自动恢复本地缓存）"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${busyText ? 'animate-spin' : ''}`} />
+                  读取 L{currentSlot + 1}
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (dirtyCount > 0) {
+                      setConfirmRead((prev) => (prev === 'all' ? null : 'all'));
+                      return;
+                    }
+                    setConfirmRead(null);
+                    void readFullDeviceConfig();
+                  }}
+                  disabled={Boolean(busyText)}
+                  title="从设备读取全部 8 层配置与全局参数（旧版固件自动恢复本地全部缓存）"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
+                >
+                  <Layers className="h-3.5 w-3.5 text-cyan-400" />
+                  读取全部
+                </button>
+
+                {confirmRead && (
+                  <div
+                    role="dialog"
+                    className={`absolute top-full z-40 mt-2 w-56 rounded-xl border border-amber-500/40 bg-slate-900/95 p-2.5 shadow-xl shadow-black/50 backdrop-blur-md ${
+                      confirmRead === 'single' ? 'left-0' : 'right-0'
+                    }`}
+                  >
+                    <p className="text-[11px] leading-relaxed text-amber-100">
+                      <span className="font-semibold text-amber-300">
+                        {confirmRead === 'single'
+                          ? `L${currentSlot + 1}`
+                          : dirtySlotLabels.join('、')}
+                      </span>{' '}
+                      有未保存修改，读取将覆盖。
+                    </p>
+                    <div className="mt-2 flex items-center justify-end gap-1.5">
+                      <button
+                        onClick={() => setConfirmRead(null)}
+                        className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] text-slate-300 transition hover:bg-slate-700"
+                      >
+                        取消
+                      </button>
+                      <button
+                        onClick={() => {
+                          const target = confirmRead;
+                          setConfirmRead(null);
+                          if (target === 'single') {
+                            void readAllFromDevice(currentSlot);
+                          } else {
+                            void readFullDeviceConfig();
+                          }
+                        }}
+                        className="rounded-md bg-amber-500 px-2 py-1 text-[11px] font-semibold text-slate-950 transition hover:bg-amber-400"
+                      >
+                        确认覆盖
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <button
                 onClick={() => void writeAllToDevice('both')}
@@ -195,18 +283,14 @@ export function TopBar() {
                   title={activeTab === 'lighting' ? '导入 .etlight 文件' : '导入 .etcfg 文件'}
                   className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-900 px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
                 >
-                  <Upload className="h-3.5 w-3.5" />
+                  <Download className="h-3.5 w-3.5" />
                 </button>
                 <button
-                  onClick={() =>
-                    activeTab === 'lighting'
-                      ? downloadBlob(exportEtlightBytes(), `ethane-layer${currentSlot + 1}.etlight`)
-                      : downloadBlob(exportEtcfgBytes(), `ethane-layer${currentSlot + 1}.etcfg`)
-                  }
-                  title={activeTab === 'lighting' ? '导出 .etlight 文件' : '导出 .etcfg 文件'}
+                  onClick={() => void exportLayerFile()}
+                  title={activeTab === 'lighting' ? '导出 .etlight 文件（另存为）' : '导出 .etcfg 文件（另存为）'}
                   className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-900 px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
                 >
-                  <Download className="h-3.5 w-3.5" />
+                  <Upload className="h-3.5 w-3.5" />
                 </button>
               </div>
 
@@ -228,7 +312,7 @@ export function TopBar() {
                 演示/模拟设备
               </button>
               <button
-                onClick={() => void connectWebHid()}
+                onClick={() => void connectDevice()}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-500"
               >
                 <PlugZap className="h-3.5 w-3.5" />

@@ -15,7 +15,7 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "types": ["w3c-web-hid", "vitest/globals"]
+    "types": ["vitest/globals"]
   },
   "include": ["src"]
 }

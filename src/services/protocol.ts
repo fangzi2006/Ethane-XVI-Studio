@@ -533,13 +533,46 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export class EthaneProtocolClient {
   private queue: Promise<unknown> = Promise.resolve();
+  private writingLock = false;
 
   constructor(private readonly transport: ITransport) {}
+
+  get isWriting(): boolean {
+    return this.writingLock;
+  }
 
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
     const run = this.queue.then(task, task);
     this.queue = run.catch(() => {});
     return run;
+  }
+
+  private isBusyResponse(resp: Uint8Array): boolean {
+    return (
+      resp[0] === 0x52 &&
+      resp[1] === 0x42 &&
+      resp[2] === 0x53 &&
+      resp[3] === 0x59
+    );
+  }
+
+  /** 发送单包并自动处理固件 Flash 写入期间返回的 RBSY 忙状态重试 */
+  private async transactCommand(
+    packet: Uint8Array,
+    timeoutMs = 600,
+    maxBusyRetries = 30,
+  ): Promise<Uint8Array> {
+    for (let attempt = 0; attempt <= maxBusyRetries; attempt++) {
+      const resp = await this.transact(packet, timeoutMs);
+      if (!this.isBusyResponse(resp)) {
+        return resp;
+      }
+      if (attempt === maxBusyRetries) {
+        throw new Error('设备正忙于 Flash 写入，请稍后重试');
+      }
+      await sleep(this.transport.kind === 'mock' ? 5 : 15);
+    }
+    throw new Error('设备正忙，请稍后重试');
   }
 
   private async transact(packet: Uint8Array, timeoutMs = 600): Promise<Uint8Array> {
@@ -683,16 +716,34 @@ export class EthaneProtocolClient {
     });
   }
 
-  /** 扩展协议：从设备 Flash 分 16 包回读 512B 键盘配置 */
-  async readKeyboardConfig(
+  /** 扩展协议：从设备 Flash 分 16 包回读 512B 键盘配置原始字节 */
+  async readKeyboardConfigRaw(
     slot: number,
     onProgress?: (pct: number) => void,
-  ): Promise<KeyboardConfig> {
+  ): Promise<Uint8Array> {
     return this.enqueue(async () => {
       const buf = new Uint8Array(512);
       const slotChar = 0x31 + slot;
+      if (this.transport.transactBatch) {
+        const pkts = Array.from({ length: 16 }, (_, chunk) =>
+          this.buildCommandPacket('BRKC', [slotChar, chunk]),
+        );
+        const resps = await this.transport.transactBatch(pkts);
+        if (!resps.some((r) => this.isBusyResponse(r))) {
+          for (let chunk = 0; chunk < 16; chunk++) {
+            const resp = resps[chunk];
+            this.assertValidResponse('BRKC', resp);
+            if (resp[4] !== slotChar || resp[5] !== chunk) {
+              throw new Error(`键盘配置回读分片校验失败（chunk ${chunk}）`);
+            }
+            buf.set(resp.subarray(6, 38), chunk * 32);
+          }
+          onProgress?.(100);
+          return buf;
+        }
+      }
       for (let chunk = 0; chunk < 16; chunk++) {
-        const resp = await this.transact(this.buildCommandPacket('BRKC', [slotChar, chunk]));
+        const resp = await this.transactCommand(this.buildCommandPacket('BRKC', [slotChar, chunk]));
         this.assertValidResponse('BRKC', resp);
         if (resp[4] !== slotChar || resp[5] !== chunk) {
           throw new Error(`键盘配置回读分片校验失败（chunk ${chunk}）`);
@@ -700,7 +751,55 @@ export class EthaneProtocolClient {
         buf.set(resp.subarray(6, 38), chunk * 32);
         onProgress?.(Math.round(((chunk + 1) / 16) * 100));
       }
-      return decodeKeyboardConfig(buf);
+      return buf;
+    });
+  }
+
+  /** 扩展协议：从设备 Flash 分 16 包回读 512B 键盘配置 */
+  async readKeyboardConfig(
+    slot: number,
+    onProgress?: (pct: number) => void,
+  ): Promise<KeyboardConfig> {
+    const buf = await this.readKeyboardConfigRaw(slot, onProgress);
+    return decodeKeyboardConfig(buf);
+  }
+
+  /** 扩展协议：从设备 Flash 分 8 包回读 256B 灯效配置原始字节 */
+  async readLightConfigRaw(
+    slot: number,
+    onProgress?: (pct: number) => void,
+  ): Promise<Uint8Array> {
+    return this.enqueue(async () => {
+      const buf = new Uint8Array(256);
+      const slotChar = 0x31 + slot;
+      if (this.transport.transactBatch) {
+        const pkts = Array.from({ length: 8 }, (_, chunk) =>
+          this.buildCommandPacket('BRLC', [slotChar, chunk]),
+        );
+        const resps = await this.transport.transactBatch(pkts);
+        if (!resps.some((r) => this.isBusyResponse(r))) {
+          for (let chunk = 0; chunk < 8; chunk++) {
+            const resp = resps[chunk];
+            this.assertValidResponse('BRLC', resp);
+            if (resp[4] !== slotChar || resp[5] !== chunk) {
+              throw new Error(`灯效配置回读分片校验失败（chunk ${chunk}）`);
+            }
+            buf.set(resp.subarray(6, 38), chunk * 32);
+          }
+          onProgress?.(100);
+          return buf;
+        }
+      }
+      for (let chunk = 0; chunk < 8; chunk++) {
+        const resp = await this.transactCommand(this.buildCommandPacket('BRLC', [slotChar, chunk]));
+        this.assertValidResponse('BRLC', resp);
+        if (resp[4] !== slotChar || resp[5] !== chunk) {
+          throw new Error(`灯效配置回读分片校验失败（chunk ${chunk}）`);
+        }
+        buf.set(resp.subarray(6, 38), chunk * 32);
+        onProgress?.(Math.round(((chunk + 1) / 8) * 100));
+      }
+      return buf;
     });
   }
 
@@ -709,70 +808,109 @@ export class EthaneProtocolClient {
     slot: number,
     onProgress?: (pct: number) => void,
   ): Promise<LightConfig> {
-    return this.enqueue(async () => {
-      const buf = new Uint8Array(256);
-      const slotChar = 0x31 + slot;
-      for (let chunk = 0; chunk < 8; chunk++) {
-        const resp = await this.transact(this.buildCommandPacket('BRLC', [slotChar, chunk]));
-        this.assertValidResponse('BRLC', resp);
-        if (resp[4] !== slotChar || resp[5] !== chunk) {
-          throw new Error(`灯效配置回读分片校验失败（chunk ${chunk}）`);
-        }
-        buf.set(resp.subarray(6, 38), chunk * 32);
-        onProgress?.(Math.round(((chunk + 1) / 8) * 100));
-      }
-      return decodeLightConfig(buf);
-    });
+    const buf = await this.readLightConfigRaw(slot, onProgress);
+    return decodeLightConfig(buf);
   }
 
-  /** 写入指定槽位的 512B 键盘配置 */
+  /** 写入指定槽位的 512B 键盘配置（含并发写保护与 CH549 Flash 落盘等待） */
   async writeKeyboardConfig(
     slot: number,
     cfg: KeyboardConfig,
     onProgress?: (pct: number) => void,
   ): Promise<void> {
+    if (this.writingLock) {
+      throw new Error('当前已有配置正在写入设备，请等待写入完成');
+    }
+    this.writingLock = true;
     const raw = encodeKeyboardConfig(cfg);
-    return this.enqueue(async () => {
-      const initResp = await this.transact(this.buildCommandPacket('DKBC', [0x31 + slot]));
-      this.assertValidResponse('DKBC', initResp);
-      for (let pack = 0; pack < 8; pack++) {
-        await sleep(5);
-        const chunk = raw.subarray(pack * 64, (pack + 1) * 64);
-        const resp = await this.transact(chunk);
-        if (resp[0] !== 0x52 || resp[1] !== 0x44 || resp[2] !== pack) {
-          throw new Error(`键盘配置第 ${pack + 1}/8 包写入确认失败`);
+    try {
+      await this.enqueue(async () => {
+        const initResp = await this.transactCommand(this.buildCommandPacket('DKBC', [0x31 + slot]));
+        this.assertValidResponse('DKBC', initResp);
+        for (let pack = 0; pack < 8; pack++) {
+          await sleep(2);
+          const chunk = raw.subarray(pack * 64, (pack + 1) * 64);
+          const resp = await this.transact(chunk);
+          if (resp[0] !== 0x52 || resp[1] !== 0x44 || resp[2] !== pack) {
+            throw new Error(`键盘配置第 ${pack + 1}/8 包写入确认失败`);
+          }
+          onProgress?.(Math.round(((pack + 1) / 8) * 100));
         }
-        onProgress?.(Math.round(((pack + 1) / 8) * 100));
-      }
-    });
+        // 短暂等待后依赖新版固件 RBSY 忙重传机制自动同步 Flash 落盘
+        await sleep(this.transport.kind === 'mock' ? 5 : 30);
+      });
+    } finally {
+      this.writingLock = false;
+    }
   }
 
-  /** 写入指定槽位的 256B 灯效配置 */
+  /** 写入指定槽位的 256B 灯效配置（含并发写保护与 CH549 Flash 落盘等待） */
   async writeLightConfig(
     slot: number,
     light: LightConfig,
     onProgress?: (pct: number) => void,
   ): Promise<void> {
+    if (this.writingLock) {
+      throw new Error('当前已有配置正在写入设备，请等待写入完成');
+    }
+    this.writingLock = true;
     const raw = encodeLightConfig(light);
-    return this.enqueue(async () => {
-      const initResp = await this.transact(this.buildCommandPacket('DLTC', [0x31 + slot]));
-      this.assertValidResponse('DLTC', initResp);
-      for (let pack = 0; pack < 4; pack++) {
-        await sleep(5);
-        const chunk = raw.subarray(pack * 64, (pack + 1) * 64);
-        const resp = await this.transact(chunk);
-        if (resp[0] !== 0x52 || resp[1] !== 0x44 || resp[2] !== pack) {
-          throw new Error(`灯效配置第 ${pack + 1}/4 包写入确认失败`);
+    try {
+      await this.enqueue(async () => {
+        const initResp = await this.transactCommand(this.buildCommandPacket('DLTC', [0x31 + slot]));
+        this.assertValidResponse('DLTC', initResp);
+        for (let pack = 0; pack < 4; pack++) {
+          await sleep(2);
+          const chunk = raw.subarray(pack * 64, (pack + 1) * 64);
+          const resp = await this.transact(chunk);
+          if (resp[0] !== 0x52 || resp[1] !== 0x44 || resp[2] !== pack) {
+            throw new Error(`灯效配置第 ${pack + 1}/4 包写入确认失败`);
+          }
+          onProgress?.(Math.round(((pack + 1) / 4) * 100));
         }
-        onProgress?.(Math.round(((pack + 1) / 4) * 100));
+        // 短暂等待后依赖新版固件 RBSY 忙重传机制自动同步 Flash 落盘
+        await sleep(this.transport.kind === 'mock' ? 5 : 20);
+      });
+    } finally {
+      this.writingLock = false;
+    }
+  }
+
+  /** 回读指定槽位 512B 键盘配置并与预期内容逐字节比对 */
+  async verifyKeyboardConfig(
+    slot: number,
+    expectedCfg: KeyboardConfig,
+    onProgress?: (pct: number) => void,
+  ): Promise<void> {
+    const expected = encodeKeyboardConfig(expectedCfg);
+    const actual = await this.readKeyboardConfigRaw(slot, onProgress);
+    for (let i = 0; i < 512; i++) {
+      if (actual[i] !== expected[i]) {
+        throw new Error(`L${slot + 1} 按键配置回读校验失败（偏移 0x${i.toString(16)} 不一致）`);
       }
-    });
+    }
+  }
+
+  /** 回读指定槽位 256B 灯效配置并与预期内容逐字节比对 */
+  async verifyLightConfig(
+    slot: number,
+    expectedLight: LightConfig,
+    onProgress?: (pct: number) => void,
+  ): Promise<void> {
+    const expected = encodeLightConfig(expectedLight);
+    const actual = await this.readLightConfigRaw(slot, onProgress);
+    for (let i = 0; i < 256; i++) {
+      if (actual[i] !== expected[i]) {
+        throw new Error(`L${slot + 1} 灯效配置回读校验失败（偏移 0x${i.toString(16)} 不一致）`);
+      }
+    }
   }
 
   async setKeyDebounce(val: number): Promise<{ oldVal: number; newVal: number }> {
     return this.enqueue(async () => {
-      const resp = await this.transact(this.buildCommandPacket('CKYT', [val]));
+      const resp = await this.transactCommand(this.buildCommandPacket('CKYT', [val]));
       this.assertValidResponse('CKYT', resp);
+      await sleep(this.transport.kind === 'mock' ? 2 : 15);
       return { oldVal: resp[4], newVal: resp[5] };
     });
   }
@@ -784,8 +922,9 @@ export class EthaneProtocolClient {
     newMidY: number;
   }> {
     return this.enqueue(async () => {
-      const resp = await this.transact(this.buildCommandPacket('CRKM'));
+      const resp = await this.transactCommand(this.buildCommandPacket('CRKM'));
       this.assertValidResponse('CRKM', resp);
+      await sleep(this.transport.kind === 'mock' ? 2 : 15);
       const u16 = (off: number) => (resp[off] << 8) | resp[off + 1];
       return {
         oldMidX: u16(4),
@@ -804,27 +943,29 @@ export class EthaneProtocolClient {
         (minY >> 8) & 0xff, minY & 0xff,
         (maxY >> 8) & 0xff, maxY & 0xff,
       ];
-      const resp = await this.transact(this.buildCommandPacket('CRKZ', payload));
+      const resp = await this.transactCommand(this.buildCommandPacket('CRKZ', payload));
       this.assertValidResponse('CRKZ', resp);
       const status = (resp[12] << 8) | resp[13];
       if (status === 0xffff) {
         throw new Error('摇杆范围被设备拒绝，请确认满足 Min < 中位 < Max');
       }
+      await sleep(this.transport.kind === 'mock' ? 2 : 15);
     });
   }
 
   async setEncoderDoubleFreq(ec1: boolean, ec2: boolean): Promise<void> {
     return this.enqueue(async () => {
-      const resp = await this.transact(
+      const resp = await this.transactCommand(
         this.buildCommandPacket('CECD', [ec1 ? 1 : 0, ec2 ? 1 : 0]),
       );
       this.assertValidResponse('CECD', resp);
+      await sleep(this.transport.kind === 'mock' ? 2 : 15);
     });
   }
 
   async switchActiveSlot(slot: number): Promise<{ oldSlot: number; newSlot: number }> {
     return this.enqueue(async () => {
-      const resp = await this.transact(this.buildCommandPacket('BCSC', [0x31 + slot]));
+      const resp = await this.transactCommand(this.buildCommandPacket('BCSC', [0x31 + slot]));
       this.assertValidResponse('BCSC', resp);
       if (resp[5] === 0xff) throw new Error('槽位切换被设备拒绝');
       return { oldSlot: resp[4] - 0x31, newSlot: resp[5] - 0x31 };

@@ -9,16 +9,14 @@ import {
   Wrench,
 } from 'lucide-react';
 import { useState } from 'react';
-import { isWebHidSupported } from '../services/transport';
 import { useDevice } from '../store/useDeviceStore';
 import { DEFAULT_PID, DEFAULT_VID } from '../types/config';
 
 export function WelcomeScreen() {
-  const { connectWebHid, connectMock } = useDevice();
+  const { connectDevice, connectMock } = useDevice();
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [vid, setVid] = useState(DEFAULT_VID);
   const [pid, setPid] = useState(DEFAULT_PID);
-  const webHidOk = isWebHidSupported();
 
   return (
     <main className="mx-auto flex min-h-[calc(100vh-64px)] max-w-5xl flex-col items-center justify-center px-4 py-12">
@@ -30,7 +28,7 @@ export function WelcomeScreen() {
           Ethane-XVI 可视化配置中心
         </h2>
         <p className="mt-3 max-w-xl text-sm text-slate-400 sm:text-base">
-          面向日常使用重新设计的网页版上位机。直接点选键帽改键、积木式编排宏指令、所见即所得调试 RGB 灯效与摇杆校准。
+          面向日常使用重新设计的桌面端上位机。直接点选键帽改键、积木式编排宏指令、所见即所得调试 RGB 灯效与摇杆校准。
         </p>
       </div>
 
@@ -43,21 +41,15 @@ export function WelcomeScreen() {
             </div>
             <h3 className="text-lg font-semibold text-white">连接实体小键盘</h3>
             <p className="mt-1.5 text-sm text-slate-400">
-              通过浏览器 WebHID 直连 Ethane-XVI（VID 0x1A86 / PID 0x5884），即插即用，无需安装额外驱动。
+              通过原生 USB HID 驱动直连 Ethane-XVI（VID 0x1A86 / PID 0x5884），插上键盘即可自动识别连接。
             </p>
-            {!webHidOk && (
-              <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-                当前浏览器不支持 WebHID，请使用最新版 Chrome / Edge，或使用右侧“模拟设备”。
-              </p>
-            )}
           </div>
           <div className="mt-6">
             <button
-              onClick={() => void connectWebHid(vid, pid)}
-              disabled={!webHidOk}
-              className="w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-600/25 transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => void connectDevice(vid, pid)}
+              className="w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-600/25 transition hover:bg-indigo-500"
             >
-              选择并连接设备
+              扫描并连接设备
             </button>
           </div>
         </div>

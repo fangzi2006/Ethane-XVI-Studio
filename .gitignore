@@ -1,6 +1,14 @@
+# Dependencies & frontend build
 node_modules/
 dist/
 .vite/
+*.tsbuildinfo
+
+# Tauri / Rust build artifacts
+src-tauri/target/
+src-tauri/gen/
+
+# Local & OS files
 *.local
 *.log
 .DS_Store

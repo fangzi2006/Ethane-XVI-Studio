@@ -537,7 +537,28 @@ export function DeviceSettings() {
                   <div className="space-y-1 border-t border-slate-800 pt-1.5 font-mono text-[10px] text-slate-400">
                     <div>配置槽错误: [{diagnostics.cfgErrors.join(', ')}]</div>
                     <div>灯效槽错误: [{diagnostics.lightErrors.join(', ')}]</div>
-                    <div>最后错误位置码: 0x{diagnostics.lastErrorPos.toString(16).padStart(2, '0')}</div>
+                    <div>
+                      最后错误位置码: 0x{diagnostics.lastErrorPos.toString(16).padStart(2, '0')}（
+                      {diagnostics.lastErrorPos === 0
+                        ? '标志初始化'
+                        : diagnostics.lastErrorPos === 1
+                          ? '诊断区校验错误'
+                          : diagnostics.lastErrorPos === 4
+                            ? '看门狗复位'
+                            : diagnostics.lastErrorPos === 5
+                              ? '连续看门狗复位'
+                              : diagnostics.lastErrorPos >= 8 && diagnostics.lastErrorPos <= 15
+                                ? `L${diagnostics.lastErrorPos - 7} 按键配置存储校验失败`
+                                : diagnostics.lastErrorPos >= 16 && diagnostics.lastErrorPos <= 23
+                                  ? `L${diagnostics.lastErrorPos - 15} 灯效配置存储校验失败`
+                                  : diagnostics.lastErrorPos === 24
+                                    ? '全局参数存储校验失败'
+                                    : '未知位置'}
+                      ）
+                    </div>
+                    <div className="font-sans text-[10px] text-slate-500">
+                      注：诊断计数为芯片 Flash 历史累计值，不会随断电清零。
+                    </div>
                   </div>
                 )}
               </div>

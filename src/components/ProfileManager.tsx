@@ -14,6 +14,7 @@ import { SCENARIO_TEMPLATES } from '../data/presets';
 import { formatShortcutCompact, usbKeyToLabel } from '../services/keycodes';
 import { useDevice } from '../store/useDeviceStore';
 import { KeyMode, SLOT_COUNT } from '../types/config';
+import { saveFileWithPicker } from '../utils/saveFile';
 
 function getMiniKeyLabel(mode: KeyMode, key: number, func: number): string {
   if (mode === KeyMode.None) return '·';
@@ -50,15 +51,14 @@ export function ProfileManager() {
   const [templateTargetSlot, setTemplateTargetSlot] = useState<number>(currentSlot);
   const jsonInputRef = useRef<HTMLInputElement>(null);
 
-  const handleDownloadBackup = () => {
+  const handleDownloadBackup = async () => {
     const json = exportWorkspaceJson();
-    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `ethane-xvi-8layers-backup.ethane.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    await saveFileWithPicker(json, {
+      suggestedName: 'ethane-xvi-8layers-backup.ethane.json',
+      description: 'Ethane-XVI 整机 8 层备份文件',
+      mimeType: 'application/json',
+      extensions: ['.json'],
+    });
   };
 
   return (
@@ -83,14 +83,14 @@ export function ProfileManager() {
             onClick={() => jsonInputRef.current?.click()}
             className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 font-medium text-slate-200 hover:bg-slate-800"
           >
-            <Upload className="h-3.5 w-3.5" /> 恢复整机备份 (.json)
+            <Download className="h-3.5 w-3.5" /> 恢复整机备份 (.json)
           </button>
           <button
             type="button"
-            onClick={handleDownloadBackup}
+            onClick={() => void handleDownloadBackup()}
             className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-2 font-semibold text-white hover:bg-indigo-500"
           >
-            <Download className="h-3.5 w-3.5" /> 导出 8 层整机备份
+            <Upload className="h-3.5 w-3.5" /> 导出 8 层整机备份
           </button>
           <input
             ref={jsonInputRef}

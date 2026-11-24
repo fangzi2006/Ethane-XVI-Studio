@@ -219,7 +219,7 @@ describe('MockTransport 与 EthaneProtocolClient 完整通信测试', () => {
   });
 
   it('所有场景预设均满足 512B/256B 容量限制并可无损编解码', () => {
-    expect(SCENARIO_TEMPLATES.length).toBe(5);
+    expect(SCENARIO_TEMPLATES.length).toBe(3);
     for (const tpl of SCENARIO_TEMPLATES) {
       const cfg = tpl.buildConfig();
       const light = tpl.buildLight();
@@ -235,5 +235,38 @@ describe('MockTransport 与 EthaneProtocolClient 完整通信测试', () => {
       expect(encodeKeyboardConfig(decodedCfg)).toEqual(cfgBytes);
       expect(decodedLight).toEqual(light);
     }
+  });
+
+  it('连续写入多个配置层后回读逐字节校验应通过，且并发重复写入会被立即拒绝', async () => {
+    const transport = new MockTransport({
+      encodeCfg: encodeKeyboardConfig,
+      encodeLight: encodeLightConfig,
+    });
+    const client = new EthaneProtocolClient(transport);
+    await transport.connect();
+
+    const cfg0 = SCENARIO_TEMPLATES[0].buildConfig();
+    const light0 = SCENARIO_TEMPLATES[0].buildLight();
+    const cfg2 = SCENARIO_TEMPLATES[2].buildConfig();
+    const light2 = SCENARIO_TEMPLATES[2].buildLight();
+
+    // 连续写入 L1 和 L3 并回读确认
+    await client.writeKeyboardConfig(0, cfg0);
+    await client.writeLightConfig(0, light0);
+    await client.verifyKeyboardConfig(0, cfg0);
+    await client.verifyLightConfig(0, light0);
+
+    await client.writeKeyboardConfig(2, cfg2);
+    await client.writeLightConfig(2, light2);
+    await client.verifyKeyboardConfig(2, cfg2);
+    await client.verifyLightConfig(2, light2);
+
+    // 校验不匹配时应抛出错误
+    await expect(client.verifyKeyboardConfig(2, cfg0)).rejects.toThrow('回读校验失败');
+
+    // 写入期间再次触发写入应被协议写锁立即拒绝，避免破坏 FlashBuf
+    const p1 = client.writeKeyboardConfig(1, cfg0);
+    await expect(client.writeLightConfig(1, light0)).rejects.toThrow('当前已有配置正在写入设备');
+    await p1;
   });
 });

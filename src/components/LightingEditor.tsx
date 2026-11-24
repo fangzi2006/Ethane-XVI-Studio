@@ -10,6 +10,7 @@ import {
 import { useRef, useState } from 'react';
 import { exportPaletteTxt, parsePaletteTxt } from '../services/protocol';
 import { useDevice } from '../store/useDeviceStore';
+import { saveFileWithPicker } from '../utils/saveFile';
 import {
   IndicatorSource,
   KEY_NUM,
@@ -315,15 +316,14 @@ export function LightingEditor({
     pushToast('success', '已生成配色方案');
   };
 
-  const handleExportTxt = () => {
+  const handleExportTxt = async () => {
     const colors = layer === 'up' ? lightConfig.upColors : lightConfig.downColors;
-    const blob = new Blob([exportPaletteTxt(colors)], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `palette-${layer}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
+    await saveFileWithPicker(exportPaletteTxt(colors), {
+      suggestedName: `palette-${layer}.txt`,
+      description: 'Ethane-XVI 配色文本文件',
+      mimeType: 'text/plain',
+      extensions: ['.txt'],
+    });
   };
 
   return (
@@ -604,15 +604,15 @@ export function LightingEditor({
               title="导入 .txt 配色"
               className="rounded-lg border border-slate-700 bg-slate-900 p-1.5 text-slate-300 hover:bg-slate-800"
             >
-              <Upload className="h-3.5 w-3.5" />
+              <Download className="h-3.5 w-3.5" />
             </button>
             <button
               type="button"
-              onClick={handleExportTxt}
-              title="导出 .txt 配色"
+              onClick={() => void handleExportTxt()}
+              title="导出 .txt 配色（另存为）"
               className="rounded-lg border border-slate-700 bg-slate-900 p-1.5 text-slate-300 hover:bg-slate-800"
             >
-              <Download className="h-3.5 w-3.5" />
+              <Upload className="h-3.5 w-3.5" />
             </button>
             <input
               ref={txtInputRef}

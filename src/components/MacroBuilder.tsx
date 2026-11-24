@@ -22,6 +22,7 @@ import {
 import { decodeMacroFile, encodeMacroFile, getMacroByteLength } from '../services/protocol';
 import { useDevice } from '../store/useDeviceStore';
 import { MacroStep } from '../types/config';
+import { saveFileWithPicker } from '../utils/saveFile';
 
 interface MacroBuilderProps {
   steps: MacroStep[];
@@ -154,16 +155,15 @@ export function MacroBuilder({ steps, screenWidth, screenHeight, onChange }: Mac
     localStorage.setItem(MACRO_FAV_STORAGE_KEY, JSON.stringify(nextFavs));
   };
 
-  const exportEtkey = () => {
+  const exportEtkey = async () => {
     try {
       const bytes = encodeMacroFile(steps);
-      const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'macro.etkey';
-      a.click();
-      URL.revokeObjectURL(url);
+      await saveFileWithPicker(bytes, {
+        suggestedName: 'macro.etkey',
+        description: 'Ethane-XVI 宏序列文件',
+        mimeType: 'application/octet-stream',
+        extensions: ['.etkey'],
+      });
     } catch (err) {
       pushToast('error', err instanceof Error ? err.message : '导出失败');
     }
@@ -221,15 +221,15 @@ export function MacroBuilder({ steps, screenWidth, screenHeight, onChange }: Mac
               onClick={() => fileInputRef.current?.click()}
               className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300 hover:bg-slate-800"
             >
-              <Upload className="h-3 w-3" /> 导入
+              <Download className="h-3 w-3" /> 导入
             </button>
             <button
               type="button"
-              onClick={exportEtkey}
+              onClick={() => void exportEtkey()}
               disabled={steps.length === 0}
               className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300 hover:bg-slate-800 disabled:opacity-40"
             >
-              <Download className="h-3 w-3" /> 导出
+              <Upload className="h-3 w-3" /> 导出
             </button>
             {steps.length > 0 && (
               <button

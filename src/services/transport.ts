@@ -1,3 +1,5 @@
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   DEFAULT_PID,
   DEFAULT_USAGE_PAGE,
@@ -27,45 +29,39 @@ export interface ConnectOptions {
 
 /**
  * 统一的底层通信传输接口。
- * 目前提供 WebHidTransport（浏览器 WebHID）和 MockTransport（离线演示模式），
- * 后续迁移 Tauri (Rust) 时仅需新增 TauriHidTransport 实现此接口，无需改动协议层和 UI。
+ * 桌面版由 TauriHidTransport（Rust hidapi 原生驱动）实现，离线测试使用 MockTransport。
  */
 export interface ITransport {
-  readonly kind: 'webhid' | 'mock' | 'tauri';
+  readonly kind: 'mock' | 'tauri';
   getStatus(): TransportStatus;
   getDeviceInfo(): DeviceInfo | null;
   connect(options?: ConnectOptions): Promise<DeviceInfo>;
   disconnect(): Promise<void>;
   send(data: Uint8Array): Promise<void>;
+  transactBatch?(packets: Uint8Array[], timeoutMs?: number): Promise<Uint8Array[]>;
   onReceive(listener: (data: Uint8Array) => void): () => void;
   onStatusChange(listener: (status: TransportStatus) => void): () => void;
 }
 
-export function isWebHidSupported(): boolean {
-  return typeof navigator !== 'undefined' && 'hid' in navigator;
+/** 静默探测是否已接入 Ethane-XVI 设备（不弹出任何授权窗口） */
+export async function probeTauriHidDevice(options?: ConnectOptions): Promise<DeviceInfo | null> {
+  const vid = options?.vendorId ?? DEFAULT_VID;
+  const pid = options?.productId ?? DEFAULT_PID;
+  const usagePage = options?.usagePage ?? DEFAULT_USAGE_PAGE;
+  try {
+    return await invoke<DeviceInfo | null>('hid_probe', { vid, pid, usagePage });
+  } catch {
+    return null;
+  }
 }
 
-export class WebHidTransport implements ITransport {
-  readonly kind = 'webhid' as const;
-  private device: HIDDevice | null = null;
+export class TauriHidTransport implements ITransport {
+  readonly kind = 'tauri' as const;
   private status: TransportStatus = 'disconnected';
   private deviceInfo: DeviceInfo | null = null;
   private receiveListeners = new Set<(data: Uint8Array) => void>();
   private statusListeners = new Set<(status: TransportStatus) => void>();
-
-  private handleInputReport = (event: HIDInputReportEvent) => {
-    const view = event.data;
-    const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-    const packet = new Uint8Array(64);
-    packet.set(bytes.subarray(0, 64));
-    this.receiveListeners.forEach((fn) => fn(packet));
-  };
-
-  private handleHardwareDisconnect = (event: HIDConnectionEvent) => {
-    if (this.device && event.device === this.device) {
-      this.cleanup();
-    }
-  };
+  private unlistenDisconnect: UnlistenFn | null = null;
 
   getStatus(): TransportStatus {
     return this.status;
@@ -80,77 +76,97 @@ export class WebHidTransport implements ITransport {
     this.statusListeners.forEach((fn) => fn(next));
   }
 
-  async connect(options?: ConnectOptions): Promise<DeviceInfo> {
-    if (!isWebHidSupported()) {
-      throw new Error('当前浏览器不支持 WebHID，请使用最新版 Chrome / Edge 或使用“模拟设备”体验');
-    }
+  private clearEventListeners() {
+    this.unlistenDisconnect?.();
+    this.unlistenDisconnect = null;
+  }
 
-    const vendorId = options?.vendorId ?? DEFAULT_VID;
-    const productId = options?.productId ?? DEFAULT_PID;
+  async connect(options?: ConnectOptions): Promise<DeviceInfo> {
+    const vid = options?.vendorId ?? DEFAULT_VID;
+    const pid = options?.productId ?? DEFAULT_PID;
     const usagePage = options?.usagePage ?? DEFAULT_USAGE_PAGE;
 
     this.setStatus('connecting');
+    this.clearEventListeners();
+
     try {
-      const devices = await navigator.hid.requestDevice({
-        filters: [{ vendorId, productId, usagePage }],
-      });
-      if (!devices.length) {
+      this.unlistenDisconnect = await listen('hid-disconnected', () => {
+        this.clearEventListeners();
+        this.deviceInfo = null;
         this.setStatus('disconnected');
-        throw new Error('未选择任何设备');
-      }
-      const target =
-        devices.find((d) => d.collections.some((c) => c.usagePage === usagePage)) ?? devices[0];
+      });
 
-      if (!target.opened) {
-        await target.open();
-      }
-
-      this.device = target;
-      this.device.addEventListener('inputreport', this.handleInputReport);
-      navigator.hid.addEventListener('disconnect', this.handleHardwareDisconnect);
-
-      this.deviceInfo = {
-        vendorId: target.vendorId,
-        productId: target.productId,
-        productName: target.productName || 'Ethane-XVI',
-      };
+      const info = await invoke<DeviceInfo>('hid_connect', { vid, pid, usagePage });
+      this.deviceInfo = info;
       this.setStatus('connected');
-      return this.deviceInfo;
+      return info;
     } catch (err) {
+      this.clearEventListeners();
+      this.deviceInfo = null;
       this.setStatus('disconnected');
-      throw err;
+      throw new Error(typeof err === 'string' ? err : err instanceof Error ? err.message : '连接设备失败');
     }
   }
 
   async disconnect(): Promise<void> {
-    if (this.device) {
-      try {
-        this.device.removeEventListener('inputreport', this.handleInputReport);
-        if (this.device.opened) {
-          await this.device.close();
-        }
-      } finally {
-        this.cleanup();
-      }
+    try {
+      await invoke('hid_disconnect');
+    } catch {
+      // ignore if already closed
+    } finally {
+      this.clearEventListeners();
+      this.deviceInfo = null;
+      this.setStatus('disconnected');
     }
-  }
-
-  private cleanup() {
-    if (isWebHidSupported()) {
-      navigator.hid.removeEventListener('disconnect', this.handleHardwareDisconnect);
-    }
-    this.device = null;
-    this.deviceInfo = null;
-    this.setStatus('disconnected');
   }
 
   async send(data: Uint8Array): Promise<void> {
-    if (!this.device || !this.device.opened) {
+    if (this.status !== 'connected') {
       throw new Error('设备未连接');
     }
     const packet = new Uint8Array(64);
     packet.set(data.subarray(0, 64));
-    await this.device.sendReport(0, packet);
+    try {
+      const raw = await invoke<number[]>('hid_transact', {
+        data: Array.from(packet),
+        timeoutMs: 600,
+      });
+      const resp = new Uint8Array(64);
+      for (let i = 0; i < Math.min(64, raw.length); i++) {
+        resp[i] = raw[i] & 0xff;
+      }
+      this.receiveListeners.forEach((fn) => fn(resp));
+    } catch (err) {
+      throw new Error(typeof err === 'string' ? err : err instanceof Error ? err.message : 'HID 通信失败');
+    }
+  }
+
+  async transactBatch(packets: Uint8Array[], timeoutMs = 600): Promise<Uint8Array[]> {
+    if (this.status !== 'connected') {
+      throw new Error('设备未连接');
+    }
+    const payload = packets.map((p) => {
+      const buf = new Uint8Array(64);
+      buf.set(p.subarray(0, 64));
+      return Array.from(buf);
+    });
+    try {
+      const rawList = await invoke<number[][]>('hid_transact_batch', {
+        packets: payload,
+        timeoutMs,
+      });
+      return rawList.map((raw) => {
+        const resp = new Uint8Array(64);
+        for (let i = 0; i < Math.min(64, raw.length); i++) {
+          resp[i] = raw[i] & 0xff;
+        }
+        return resp;
+      });
+    } catch (err) {
+      throw new Error(
+        typeof err === 'string' ? err : err instanceof Error ? err.message : 'HID 批量通信失败',
+      );
+    }
   }
 
   onReceive(listener: (data: Uint8Array) => void): () => void {

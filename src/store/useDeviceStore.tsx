@@ -23,8 +23,9 @@ import {
   DeviceInfo,
   ITransport,
   MockTransport,
+  TauriHidTransport,
   TransportStatus,
-  WebHidTransport,
+  probeTauriHidDevice,
 } from '../services/transport';
 
 export type SelectionTarget =
@@ -148,11 +149,12 @@ interface DeviceContextValue {
   toasts: ToastItem[];
   pushToast: (type: ToastItem['type'], message: string) => void;
 
-  connectWebHid: (vid?: number, pid?: number) => Promise<void>;
+  connectDevice: (vid?: number, pid?: number, silent?: boolean) => Promise<void>;
   connectMock: () => Promise<void>;
   disconnect: () => Promise<void>;
 
   readAllFromDevice: (slotOverride?: number) => Promise<void>;
+  readFullDeviceConfig: () => Promise<void>;
   writeAllToDevice: (mode?: 'both' | 'cfg' | 'light') => Promise<void>;
   writeDirtySlotsToDevice: () => Promise<void>;
   switchDeviceSlot: (slot: number) => Promise<void>;
@@ -200,6 +202,8 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
   const transportRef = useRef<ITransport | null>(null);
   const clientRef = useRef<EthaneProtocolClient | null>(null);
   const mockTransportRef = useRef<MockTransport | null>(null);
+  /** 同步读写互斥锁：防止快速连点或并发触发第二次写入/读取导致 CH549 FlashBuf 冲突 */
+  const ioLockRef = useRef<string | null>(null);
 
   const [status, setStatus] = useState<TransportStatus>('disconnected');
   const [deviceInfo, setDeviceInfo] = useState<DeviceInfo | null>(null);
@@ -306,6 +310,11 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         pushToast('warning', '请先连接设备或进入模拟模式');
         return;
       }
+      if (ioLockRef.current) {
+        pushToast('warning', `正在${ioLockRef.current}，请等待完成`);
+        return;
+      }
+      ioLockRef.current = '读取配置';
 
       setBusyText('正在读取设备配置...');
       setBusyProgress(10);
@@ -401,6 +410,7 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
       } catch (err) {
         pushToast('error', `读取失败：${err instanceof Error ? err.message : String(err)}`);
       } finally {
+        ioLockRef.current = null;
         setBusyText(null);
         setBusyProgress(null);
       }
@@ -408,25 +418,140 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     [currentSlot, pushToast],
   );
 
-  const connectWebHid = useCallback(
-    async (vid?: number, pid?: number) => {
+  const readFullDeviceConfig = useCallback(async () => {
+    const client = clientRef.current;
+    if (!client) {
+      pushToast('warning', '请先连接设备或进入模拟模式');
+      return;
+    }
+    if (ioLockRef.current) {
+      pushToast('warning', `正在${ioLockRef.current}，请等待完成`);
+      return;
+    }
+    ioLockRef.current = '读取整机配置';
+
+    setBusyText('正在读取整机信息与全局参数...');
+    setBusyProgress(5);
+    try {
+      const [fw, uid, gp] = await Promise.all([
+        client.readFirmwareVersion(),
+        client.readSerialNumber(),
+        client.readGlobalParams(),
+      ]);
+      setFirmwareVersion(fw);
+      setSerialNumber(uid);
+      setGlobalParams(gp);
+      setSlotMetas(loadSlotMetas(uid));
+
+      try {
+        const active = await client.readActiveSlot();
+        setDeviceActiveSlot(active);
+        setCurrentSlotState(active);
+      } catch (err) {
+        if (!(err instanceof InvalidCommandError)) throw err;
+      }
+
+      const nextCfgs: KeyboardConfig[] = [];
+      const nextLights: LightConfig[] = [];
+      const nextSigs: string[] = [];
+      let usedFallback = false;
+
+      for (let slot = 0; slot < SLOT_COUNT; slot++) {
+        const basePct = 10 + (slot / SLOT_COUNT) * 90;
+        const stepSpan = 90 / SLOT_COUNT;
+        try {
+          setBusyText(`正在读取整机配置 (${slot + 1}/${SLOT_COUNT} · L${slot + 1} 按键)...`);
+          const cfg = await client.readKeyboardConfig(slot, (p) =>
+            setBusyProgress(Math.round(basePct + p * stepSpan * 0.55)),
+          );
+          setBusyText(`正在读取整机配置 (${slot + 1}/${SLOT_COUNT} · L${slot + 1} 灯效)...`);
+          const light = await client.readLightConfig(slot, (p) =>
+            setBusyProgress(Math.round(basePct + stepSpan * 0.55 + p * stepSpan * 0.45)),
+          );
+          nextCfgs.push(cfg);
+          nextLights.push(light);
+          nextSigs.push(computeSlotSignature(cfg, light));
+          saveLocalSlot(uid, 'cfg', slot, cfg);
+          saveLocalSlot(uid, 'light', slot, light);
+        } catch (err) {
+          if (err instanceof InvalidCommandError) {
+            usedFallback = true;
+            setFirmwareSupportsReadback(false);
+            setLegacyNoticeDismissed(false);
+            nextCfgs.length = 0;
+            nextLights.length = 0;
+            nextSigs.length = 0;
+            for (let s = 0; s < SLOT_COUNT; s++) {
+              const cachedCfg = loadLocalSlot<KeyboardConfig>(uid, 'cfg', s);
+              const cachedLight = loadLocalSlot<LightConfig>(uid, 'light', s);
+              const finalCfg = cachedCfg ?? createDefaultKeyboardConfig();
+              const finalLight = cachedLight ?? createDefaultLightConfig();
+              nextCfgs.push(finalCfg);
+              nextLights.push(finalLight);
+              nextSigs.push(computeSlotSignature(finalCfg, finalLight));
+            }
+            break;
+          }
+          throw err;
+        }
+      }
+
+      setSlotCfgs(nextCfgs);
+      setSlotLights(nextLights);
+      setSavedSignatures(nextSigs);
+
+      if (usedFallback) {
+        pushToast(
+          'warning',
+          '当前为旧版固件，不支持直接从设备读取配置（已恢复本地全部 8 层缓存，如需支持请更新固件）',
+        );
+      } else {
+        setFirmwareSupportsReadback(true);
+        pushToast('success', '已从设备读取整机配置（全部 8 层与全局参数）');
+      }
+    } catch (err) {
+      pushToast('error', `整机读取失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      ioLockRef.current = null;
+      setBusyText(null);
+      setBusyProgress(null);
+    }
+  }, [pushToast]);
+
+  const connectDevice = useCallback(
+    async (vid?: number, pid?: number, silent = false) => {
       if (transportRef.current) {
         await transportRef.current.disconnect();
       }
       mockTransportRef.current = null;
-      const webhid = new WebHidTransport();
-      bindTransport(webhid);
+      const tauriHid = new TauriHidTransport();
+      bindTransport(tauriHid);
       try {
-        const info = await webhid.connect({ vendorId: vid, productId: pid });
+        const info = await tauriHid.connect({ vendorId: vid, productId: pid });
         setDeviceInfo(info);
         pushToast('success', `已连接设备：${info.productName}`);
-        await readAllFromDevice();
+        await readFullDeviceConfig();
       } catch (err) {
-        pushToast('error', err instanceof Error ? err.message : '连接设备失败');
+        if (!silent) {
+          pushToast('error', err instanceof Error ? err.message : '连接设备失败');
+        }
       }
     },
-    [bindTransport, pushToast, readAllFromDevice],
+    [bindTransport, pushToast, readFullDeviceConfig],
   );
+
+  // 启动时自动静默扫描并连接 Ethane-XVI 实体键盘
+  const autoConnectAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (autoConnectAttemptedRef.current) return;
+    autoConnectAttemptedRef.current = true;
+    void (async () => {
+      const found = await probeTauriHidDevice();
+      if (found && !transportRef.current) {
+        await connectDevice(found.vendorId, found.productId, true);
+      }
+    })();
+  }, [connectDevice]);
 
   const connectMock = useCallback(async () => {
     if (transportRef.current) {
@@ -440,9 +565,9 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     bindTransport(mock);
     const info = await mock.connect();
     setDeviceInfo(info);
-    pushToast('info', '已进入模拟演示模式，所有读写与校准均可无硬件体验');
-    await readAllFromDevice(0);
-  }, [bindTransport, pushToast, readAllFromDevice]);
+    pushToast('info', '已进入模拟演示模式，正在载入整机配置');
+    await readFullDeviceConfig();
+  }, [bindTransport, pushToast, readFullDeviceConfig]);
 
   const disconnect = useCallback(async () => {
     setLivePolling(false);
@@ -471,9 +596,15 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         pushToast('warning', '请先连接设备或点击“演示/模拟设备”');
         return;
       }
+      if (ioLockRef.current) {
+        pushToast('warning', `正在${ioLockRef.current}，请等待完成后再写入`);
+        return;
+      }
+      ioLockRef.current = `写入 L${currentSlot + 1}`;
 
       const cfg = slotCfgs[currentSlot];
       const light = slotLights[currentSlot];
+      let verifySkippedLegacy = false;
 
       setBusyText(`正在写入 L${currentSlot + 1}...`);
       setBusyProgress(5);
@@ -481,15 +612,46 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         if (mode === 'both' || mode === 'cfg') {
           setBusyText(`正在写入 L${currentSlot + 1} 按键配置...`);
           await client.writeKeyboardConfig(currentSlot, cfg, (p) =>
-            setBusyProgress(mode === 'both' ? Math.round(p * 0.65) : p),
+            setBusyProgress(mode === 'both' ? Math.round(p * 0.35) : Math.round(p * 0.55)),
           );
-          saveLocalSlot(serialNumber, 'cfg', currentSlot, cfg);
         }
         if (mode === 'both' || mode === 'light') {
           setBusyText(`正在写入 L${currentSlot + 1} 灯效配置...`);
           await client.writeLightConfig(currentSlot, light, (p) =>
-            setBusyProgress(mode === 'both' ? 65 + Math.round(p * 0.35) : p),
+            setBusyProgress(
+              mode === 'both' ? 35 + Math.round(p * 0.25) : Math.round(p * 0.55),
+            ),
           );
+        }
+
+        // 写入后回读对应层数据进行逐字节确认
+        try {
+          if (mode === 'both' || mode === 'cfg') {
+            setBusyText(`正在回读校验 L${currentSlot + 1} 按键配置...`);
+            await client.verifyKeyboardConfig(currentSlot, cfg, (p) =>
+              setBusyProgress(mode === 'both' ? 60 + Math.round(p * 0.25) : 55 + Math.round(p * 0.45)),
+            );
+          }
+          if (mode === 'both' || mode === 'light') {
+            setBusyText(`正在回读校验 L${currentSlot + 1} 灯效配置...`);
+            await client.verifyLightConfig(currentSlot, light, (p) =>
+              setBusyProgress(mode === 'both' ? 85 + Math.round(p * 0.15) : 55 + Math.round(p * 0.45)),
+            );
+          }
+          setFirmwareSupportsReadback(true);
+        } catch (err) {
+          if (err instanceof InvalidCommandError) {
+            verifySkippedLegacy = true;
+            setFirmwareSupportsReadback(false);
+          } else {
+            throw err;
+          }
+        }
+
+        if (mode === 'both' || mode === 'cfg') {
+          saveLocalSlot(serialNumber, 'cfg', currentSlot, cfg);
+        }
+        if (mode === 'both' || mode === 'light') {
           saveLocalSlot(serialNumber, 'light', currentSlot, light);
         }
         setSavedSignatures((prev) => {
@@ -498,10 +660,15 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
           return next;
         });
         const label = mode === 'cfg' ? '按键配置' : mode === 'light' ? '灯效配置' : '按键与灯效配置';
-        pushToast('success', `L${currentSlot + 1} ${label}已成功写入设备！`);
+        if (verifySkippedLegacy) {
+          pushToast('warning', `L${currentSlot + 1} ${label}已写入（旧版固件不支持回读校验）`);
+        } else {
+          pushToast('success', `L${currentSlot + 1} ${label}已写入并通过回读校验！`);
+        }
       } catch (err) {
         pushToast('error', `写入失败：${err instanceof Error ? err.message : String(err)}`);
       } finally {
+        ioLockRef.current = null;
         setBusyText(null);
         setBusyProgress(null);
       }
@@ -515,13 +682,20 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
       pushToast('warning', '请先连接设备或进入模拟模式');
       return;
     }
+    if (ioLockRef.current) {
+      pushToast('warning', `正在${ioLockRef.current}，请等待完成后再同步`);
+      return;
+    }
     const targets = dirtySlots
       .map((dirty, idx) => (dirty ? idx : -1))
       .filter((idx) => idx !== -1);
     if (targets.length === 0) return;
 
+    ioLockRef.current = `批量同步 ${targets.length} 个配置层`;
     setBusyText(`准备同步 ${targets.length} 个配置层...`);
     setBusyProgress(5);
+    let verifySkippedLegacy = false;
+    let verifiedCount = 0;
     try {
       for (let i = 0; i < targets.length; i++) {
         const slot = targets[i];
@@ -530,14 +704,36 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         const basePct = (i / targets.length) * 100;
         const spanPct = 100 / targets.length;
 
-        setBusyText(`正在同步 L${slot + 1} 按键配置 (${i + 1}/${targets.length})...`);
+        setBusyText(`正在写入 L${slot + 1} 按键配置 (${i + 1}/${targets.length})...`);
         await client.writeKeyboardConfig(slot, cfg, (p) =>
-          setBusyProgress(Math.round(basePct + (p / 100) * spanPct * 0.65)),
+          setBusyProgress(Math.round(basePct + (p / 100) * spanPct * 0.35)),
         );
-        setBusyText(`正在同步 L${slot + 1} 灯效配置 (${i + 1}/${targets.length})...`);
+        setBusyText(`正在写入 L${slot + 1} 灯效配置 (${i + 1}/${targets.length})...`);
         await client.writeLightConfig(slot, light, (p) =>
-          setBusyProgress(Math.round(basePct + spanPct * 0.65 + (p / 100) * spanPct * 0.35)),
+          setBusyProgress(Math.round(basePct + spanPct * 0.35 + (p / 100) * spanPct * 0.25)),
         );
+
+        // 每写完一层立即回读确认，确保 CH549 Flash 已落盘无误再继续下一层
+        if (!verifySkippedLegacy) {
+          try {
+            setBusyText(`正在回读校验 L${slot + 1} 按键 (${i + 1}/${targets.length})...`);
+            await client.verifyKeyboardConfig(slot, cfg, (p) =>
+              setBusyProgress(Math.round(basePct + spanPct * 0.6 + (p / 100) * spanPct * 0.25)),
+            );
+            setBusyText(`正在回读校验 L${slot + 1} 灯效 (${i + 1}/${targets.length})...`);
+            await client.verifyLightConfig(slot, light, (p) =>
+              setBusyProgress(Math.round(basePct + spanPct * 0.85 + (p / 100) * spanPct * 0.15)),
+            );
+            setFirmwareSupportsReadback(true);
+          } catch (err) {
+            if (err instanceof InvalidCommandError) {
+              verifySkippedLegacy = true;
+              setFirmwareSupportsReadback(false);
+            } else {
+              throw err;
+            }
+          }
+        }
 
         saveLocalSlot(serialNumber, 'cfg', slot, cfg);
         saveLocalSlot(serialNumber, 'light', slot, light);
@@ -546,11 +742,21 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
           next[slot] = computeSlotSignature(cfg, light);
           return next;
         });
+        verifiedCount++;
       }
-      pushToast('success', `已同步全部 ${targets.length} 个修改的配置层到设备！`);
+      if (verifySkippedLegacy) {
+        pushToast('warning', `已同步全部 ${targets.length} 个配置层（旧版固件不支持回读校验）`);
+      } else {
+        pushToast('success', `已同步全部 ${targets.length} 个配置层并通过回读校验！`);
+      }
     } catch (err) {
-      pushToast('error', `批量同步失败：${err instanceof Error ? err.message : String(err)}`);
+      const partialNote = verifiedCount > 0 ? `（前 ${verifiedCount} 层已成功保存）` : '';
+      pushToast(
+        'error',
+        `批量同步失败${partialNote}：${err instanceof Error ? err.message : String(err)}`,
+      );
     } finally {
+      ioLockRef.current = null;
       setBusyText(null);
       setBusyProgress(null);
     }
@@ -824,7 +1030,7 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     let active = true;
     const tick = async () => {
       const client = clientRef.current;
-      if (!client || !active) return;
+      if (!client || !active || ioLockRef.current) return;
       try {
         const input = await client.readLiveInput();
         if (active) setLiveInput(input);
@@ -912,10 +1118,11 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         dirtySlots,
         toasts,
         pushToast,
-        connectWebHid,
+        connectDevice,
         connectMock,
         disconnect,
         readAllFromDevice,
+        readFullDeviceConfig,
         writeAllToDevice,
         writeDirtySlotsToDevice,
         switchDeviceSlot,
