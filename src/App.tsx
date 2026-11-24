@@ -11,7 +11,6 @@ import { RgbTuple } from './types/config';
 
 function Workspace() {
   const { status, activeTab, setLightConfig, toasts } = useDevice();
-  const [lightSubTab, setLightSubTab] = useState<'keys' | 'sysled'>('keys');
   const [paintMode, setPaintMode] = useState(false);
   const [lightLayer, setLightLayer] = useState<'up' | 'down'>('up');
   const [brushColor, setBrushColor] = useState<RgbTuple>([0, 110, 140]);
@@ -45,7 +44,6 @@ function Workspace() {
                 mode={activeTab === 'lighting' ? 'lighting' : 'keymap'}
                 paintMode={paintMode}
                 onPaintKey={handlePaintKey}
-                onSelectLed={() => setLightSubTab('sysled')}
                 lightingLayer={lightLayer}
               />
             </div>
@@ -55,8 +53,6 @@ function Workspace() {
             {activeTab === 'keymap' && <KeyEditor />}
             {activeTab === 'lighting' && (
               <LightingEditor
-                subTab={lightSubTab}
-                setSubTab={setLightSubTab}
                 paintMode={paintMode}
                 setPaintMode={setPaintMode}
                 layer={lightLayer}

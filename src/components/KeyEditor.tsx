@@ -1,4 +1,5 @@
 import {
+  Check,
   ChevronDown,
   Gamepad2,
   Keyboard,
@@ -8,8 +9,9 @@ import {
   Repeat,
   RotateCw,
   Sparkles,
+  X,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   AuxKeyMode,
   EncoderConfig,
@@ -17,6 +19,7 @@ import {
   KEY_SECTION_MAX_BYTES,
   KeyConfig,
   KeyMode,
+  RockerConfig,
   RockerMode,
   SLOT_COUNT,
 } from '../types/config';
@@ -45,25 +48,110 @@ function modeToCategory(mode: KeyMode): KeyCategory {
   return 'extra';
 }
 
+function cloneKey(k: KeyConfig): KeyConfig {
+  return { ...k, macro: k.macro.map((m) => ({ ...m })) };
+}
+
+function DraftActionBar({
+  hasChanges,
+  onConfirm,
+  onCancel,
+}: {
+  hasChanges: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2.5">
+      <span className={`text-xs ${hasChanges ? 'font-medium text-amber-300' : 'text-slate-500'}`}>
+        {hasChanges ? '当前有未确认的修改，点击“确认”后才会生效' : '修改选项后请点击“确认”应用到当前键位'}
+      </span>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={!hasChanges}
+          onClick={onCancel}
+          className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <X className="h-3.5 w-3.5" />
+          取消
+        </button>
+        <button
+          type="button"
+          disabled={!hasChanges}
+          onClick={onConfirm}
+          className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm shadow-indigo-600/30 transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Check className="h-3.5 w-3.5" />
+          确认
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function KeyEditor() {
-  const { selection, keyboardConfig, setKeyboardConfig, pushToast } = useDevice();
+  const { selection, currentSlot, keyboardConfig, setKeyboardConfig, pushToast } = useDevice();
   const [rockerFocus, setRockerFocus] = useState<'up' | 'down' | 'left' | 'right' | 'center'>('up');
   const [encoderFocus, setEncoderFocus] = useState<'ccw' | 'press' | 'cw'>('ccw');
   const [showRockerAdvanced, setShowRockerAdvanced] = useState(false);
-  const totalKeyBytes = calculateKeySectionSize(keyboardConfig.keys);
+
+  // 本地草稿态：切换其他按键/旋钮/摇杆或配置层时自动丢弃未确认的草稿
+  const activeKeyIdx = selection.kind === 'key' ? selection.index : 0;
+  const activeEncIdx: 0 | 1 = selection.kind === 'encoder' ? selection.index : 0;
+
+  const committedKey = keyboardConfig.keys[activeKeyIdx];
+  const committedRocker = keyboardConfig.rocker;
+  const committedEncoder = keyboardConfig.encoders[activeEncIdx];
+
+  const [draftKey, setDraftKey] = useState<KeyConfig>(() => cloneKey(committedKey));
+  const [draftRocker, setDraftRocker] = useState<RockerConfig>(() => ({ ...committedRocker }));
+  const [draftEncoder, setDraftEncoder] = useState<EncoderConfig>(() => ({ ...committedEncoder }));
+
+  // 切换选中部件、切换层或外部配置变更时自动同步草稿（放弃未确认修改）
+  useEffect(() => {
+    setDraftKey(cloneKey(committedKey));
+  }, [activeKeyIdx, currentSlot, committedKey]);
+
+  useEffect(() => {
+    setDraftRocker({ ...committedRocker });
+  }, [selection.kind, currentSlot, committedRocker]);
+
+  useEffect(() => {
+    setDraftEncoder({ ...committedEncoder });
+  }, [activeEncIdx, selection.kind, currentSlot, committedEncoder]);
 
   // ==================== 1. 机械按键 K1~K16 ====================
   if (selection.kind === 'key' || selection.kind === 'led') {
-    const idx = selection.kind === 'key' ? selection.index : 0;
-    const keyCfg = keyboardConfig.keys[idx];
+    const idx = activeKeyIdx;
+    const keyCfg = draftKey;
     const category = modeToCategory(keyCfg.mode);
+    const hasChanges = JSON.stringify(draftKey) !== JSON.stringify(committedKey);
+
+    // 实时预览应用草稿后的 16 键总字节占用
+    const previewKeys = [...keyboardConfig.keys];
+    previewKeys[idx] = draftKey;
+    const totalKeyBytes = calculateKeySectionSize(previewKeys);
 
     const patchKey = (patch: Partial<KeyConfig>) => {
+      setDraftKey((prev) => ({ ...prev, ...patch }));
+    };
+
+    const confirmKey = () => {
+      if (totalKeyBytes > KEY_SECTION_MAX_BYTES) {
+        pushToast('error', `按键总配置长度 ${totalKeyBytes}B 超过固件 468B 上限，请精简宏步骤`);
+        return;
+      }
       setKeyboardConfig((prev) => {
         const nextKeys = [...prev.keys];
-        nextKeys[idx] = { ...nextKeys[idx], ...patch };
+        nextKeys[idx] = cloneKey(draftKey);
         return { ...prev, keys: nextKeys };
       });
+      pushToast('success', `已更新按键 K${idx + 1} 配置`);
+    };
+
+    const cancelKey = () => {
+      setDraftKey(cloneKey(committedKey));
     };
 
     const switchCategory = (cat: KeyCategory) => {
@@ -115,7 +203,7 @@ export function KeyEditor() {
             </div>
             <div>
               <h2 className="text-base font-semibold text-white">按键 K{idx + 1}</h2>
-              <p className="text-xs text-slate-400">选择想要的功能类型，直接录制按键即可</p>
+              <p className="text-xs text-slate-400">编辑完成后请点击下方“确认”应用修改</p>
             </div>
           </div>
           <div
@@ -418,7 +506,7 @@ export function KeyEditor() {
                       </button>
                     ))}
                   </div>
-                  <div className="grid gap-3 sm:grid-cols-3 text-xs">
+                  <div className="grid gap-3 text-xs sm:grid-cols-3">
                     <label className="space-y-1">
                       <span className="text-slate-300">蜂鸣提示音量：{morseVol}/10</span>
                       <input
@@ -462,20 +550,30 @@ export function KeyEditor() {
             </div>
           )}
         </div>
+
+        {/* 底部确认 / 取消操作条 */}
+        <DraftActionBar hasChanges={hasChanges} onConfirm={confirmKey} onCancel={cancelKey} />
       </div>
     );
   }
 
-  // ==================== 2. 摇杆 RK1（场景化人话重构） ====================
+  // ==================== 2. 摇杆 RK1（草稿态 + 确认/取消） ====================
   if (selection.kind === 'rocker') {
-    const rk = keyboardConfig.rocker;
-    const patchRocker = (patch: Partial<typeof rk>) =>
-      setKeyboardConfig((prev) => ({ ...prev, rocker: { ...prev.rocker, ...patch } }));
+    const rk = draftRocker;
+    const hasChanges = JSON.stringify(draftRocker) !== JSON.stringify(committedRocker);
+    const patchRocker = (patch: Partial<RockerConfig>) =>
+      setDraftRocker((prev) => ({ ...prev, ...patch }));
+
+    const confirmRocker = () => {
+      setKeyboardConfig((prev) => ({ ...prev, rocker: { ...draftRocker } }));
+      pushToast('success', '已更新摇杆 RK1 配置');
+    };
+    const cancelRocker = () => setDraftRocker({ ...committedRocker });
+
     const permSlot = usbKeyToDigit(rk.centerKey) ?? 1;
     const isKeyMode = rk.mode === RockerMode.FourWay || rk.mode === RockerMode.EightWay;
     const isRepeatMode = rk.nearParam > 0 || rk.farParam > 0;
 
-    // 光标区域可视化预览计算
     const pctUp = cursorRangeKeyToPercent(rk.upKey);
     const pctDown = cursorRangeKeyToPercent(rk.downKey);
     const pctLeft = cursorRangeKeyToPercent(rk.leftKey);
@@ -516,15 +614,14 @@ export function KeyEditor() {
             </div>
             <div>
               <h2 className="text-base font-semibold text-white">摇杆 RK1（左上角）</h2>
-              <p className="text-xs text-slate-400">可模拟方向键、鼠标移动或屏幕区域指针，支持下压触发</p>
+              <p className="text-xs text-slate-400">编辑完成后请点击下方“确认”应用修改</p>
             </div>
           </div>
 
-          {/* 快捷场景一键配置 */}
           <div className="flex flex-wrap gap-1.5 text-[11px]">
             <button
               type="button"
-              onClick={() => {
+              onClick={() =>
                 patchRocker({
                   mode: RockerMode.FourWay,
                   upKey: 82,
@@ -533,16 +630,15 @@ export function KeyEditor() {
                   rightKey: 79,
                   nearParam: 0,
                   farParam: 0,
-                });
-                pushToast('success', '摇杆已设为「上下左右方向键（长按）」');
-              }}
+                })
+              }
               className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-cyan-400"
             >
               方向键
             </button>
             <button
               type="button"
-              onClick={() => {
+              onClick={() =>
                 patchRocker({
                   mode: RockerMode.EightWay,
                   upKey: 26,
@@ -551,25 +647,23 @@ export function KeyEditor() {
                   rightKey: 7,
                   nearParam: 0,
                   farParam: 0,
-                });
-                pushToast('success', '摇杆已设为「游戏 WASD（8向斜走）」');
-              }}
+                })
+              }
               className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-cyan-400"
             >
               游戏 WASD
             </button>
             <button
               type="button"
-              onClick={() => {
+              onClick={() =>
                 patchRocker({
                   mode: RockerMode.SpeedMouse,
                   deadzone: 15,
                   inertia: 10,
                   nearParam: 2,
                   farParam: 25,
-                });
-                pushToast('success', '摇杆已设为「速度鼠标」');
-              }}
+                })
+              }
               className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-cyan-400"
             >
               模拟鼠标
@@ -577,7 +671,6 @@ export function KeyEditor() {
           </div>
         </div>
 
-        {/* 模式选择 */}
         <div className="grid gap-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4 sm:grid-cols-2">
           <label className="space-y-1 text-xs">
             <span className="font-medium text-slate-300">推动摇杆时的用途</span>
@@ -609,7 +702,6 @@ export function KeyEditor() {
           </label>
         </div>
 
-        {/* 方向/下压绑定卡片 */}
         {(isKeyMode || rk.keyMode !== AuxKeyMode.None) && (
           <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
             <div className="grid grid-cols-5 gap-2">
@@ -693,7 +785,6 @@ export function KeyEditor() {
           </div>
         )}
 
-        {/* 按模式动态呈现易懂的手感参数 */}
         {isKeyMode && (
           <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -804,7 +895,6 @@ export function KeyEditor() {
 
         {rk.mode === RockerMode.CursorPos && (
           <div className="grid gap-4 rounded-2xl border border-slate-800 bg-slate-900/50 p-4 text-xs sm:grid-cols-12">
-            {/* 迷你 16:9 屏幕范围可视化示意图 */}
             <div className="flex flex-col items-center justify-center sm:col-span-5">
               <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-slate-700 bg-slate-950">
                 <div
@@ -891,7 +981,6 @@ export function KeyEditor() {
           </div>
         )}
 
-        {/* 折叠摇杆方向反向与死区微调 */}
         {rk.mode !== RockerMode.None && (
           <div className="rounded-2xl border border-slate-800 bg-slate-900/40 text-xs">
             <button
@@ -952,22 +1041,31 @@ export function KeyEditor() {
             )}
           </div>
         )}
+
+        <DraftActionBar hasChanges={hasChanges} onConfirm={confirmRocker} onCancel={cancelRocker} />
       </div>
     );
   }
 
-  // ==================== 3. 双旋钮 EC1 / EC2（带快捷场景预设） ====================
-  const eIdx = selection.index;
-  const ec = keyboardConfig.encoders[eIdx];
+  // ==================== 3. 双旋钮 EC1 / EC2（草稿态 + 确认/取消） ====================
+  const eIdx = activeEncIdx;
+  const ec = draftEncoder;
+  const hasChanges = JSON.stringify(draftEncoder) !== JSON.stringify(committedEncoder);
   const title = eIdx === 0 ? '旋钮 1（最右侧）' : '旋钮 2（顶部靠中）';
 
   const patchEncoder = (patch: Partial<EncoderConfig>) => {
+    setDraftEncoder((prev) => ({ ...prev, ...patch }));
+  };
+
+  const confirmEncoder = () => {
     setKeyboardConfig((prev) => {
       const next: [EncoderConfig, EncoderConfig] = [{ ...prev.encoders[0] }, { ...prev.encoders[1] }];
-      next[eIdx] = { ...next[eIdx], ...patch };
+      next[eIdx] = { ...draftEncoder };
       return { ...prev, encoders: next };
     });
+    pushToast('success', `已更新${title}配置`);
   };
+  const cancelEncoder = () => setDraftEncoder({ ...committedEncoder });
 
   const dial = decodeDialRotate(ec.ccwKey, ec.cwKey, ec.ccwFunc);
   const permSlot = usbKeyToDigit(ec.pressKey) ?? 1;
@@ -981,15 +1079,14 @@ export function KeyEditor() {
           </div>
           <div>
             <h2 className="text-base font-semibold text-white">{title}</h2>
-            <p className="text-xs text-slate-400">适合调音量、缩放画面、拖动时间轴或作为 Surface Dial</p>
+            <p className="text-xs text-slate-400">编辑完成后请点击下方“确认”应用修改</p>
           </div>
         </div>
 
-        {/* 一键常用旋钮方案 */}
         <div className="flex flex-wrap gap-1.5 text-[11px]">
           <button
             type="button"
-            onClick={() => {
+            onClick={() =>
               patchEncoder({
                 rotateMode: EncoderRotateMode.KeyOrShortcut,
                 keyMode: AuxKeyMode.KeyOrShortcut,
@@ -999,16 +1096,15 @@ export function KeyEditor() {
                 cwFunc: 0,
                 pressKey: 244,
                 pressFunc: 0,
-              });
-              pushToast('success', `${title}已设为「音量调节 + 按下静音」`);
-            }}
+              })
+            }
             className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-amber-400"
           >
             音量 + 静音
           </button>
           <button
             type="button"
-            onClick={() => {
+            onClick={() =>
               patchEncoder({
                 rotateMode: EncoderRotateMode.KeyOrShortcut,
                 keyMode: AuxKeyMode.KeyOrShortcut,
@@ -1018,23 +1114,21 @@ export function KeyEditor() {
                 cwFunc: 0x01,
                 pressKey: 39,
                 pressFunc: 0x01,
-              });
-              pushToast('success', `${title}已设为「画面缩放 + 按下重置 100%」`);
-            }}
+              })
+            }
             className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-amber-400"
           >
             画面缩放
           </button>
           <button
             type="button"
-            onClick={() => {
+            onClick={() =>
               patchEncoder({
                 rotateMode: EncoderRotateMode.Dial,
                 keyMode: AuxKeyMode.Dial,
                 ...encodeDialRotate(10, 2),
-              });
-              pushToast('success', `${title}已设为「Surface Dial 轮盘」`);
-            }}
+              })
+            }
             className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300 hover:border-amber-400"
           >
             Surface Dial
@@ -1120,7 +1214,6 @@ export function KeyEditor() {
         </div>
       )}
 
-      {/* 三向聚焦编辑器 */}
       <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
         <div className="grid grid-cols-3 gap-2">
           {(
@@ -1232,6 +1325,8 @@ export function KeyEditor() {
           </div>
         )}
       </div>
+
+      <DraftActionBar hasChanges={hasChanges} onConfirm={confirmEncoder} onCancel={cancelEncoder} />
     </div>
   );
 }

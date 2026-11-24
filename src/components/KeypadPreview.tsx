@@ -2,6 +2,7 @@ import { Gamepad2, Paintbrush, RotateCw, Usb } from 'lucide-react';
 import {
   AuxKeyMode,
   EncoderRotateMode,
+  IndicatorSource,
   KeyConfig,
   KeyMode,
   RockerMode,
@@ -19,7 +20,6 @@ interface KeypadPreviewProps {
   mode: 'keymap' | 'lighting';
   paintMode?: boolean;
   onPaintKey?: (keyIndex: number) => void;
-  onSelectLed?: () => void;
   lightingLayer?: 'up' | 'down';
 }
 
@@ -79,7 +79,6 @@ export function KeypadPreview({
   mode,
   paintMode = false,
   onPaintKey,
-  onSelectLed,
   lightingLayer = 'up',
 }: KeypadPreviewProps) {
   const {
@@ -92,8 +91,14 @@ export function KeypadPreview({
     liveInput,
   } = useDevice();
 
-  const [tagR, tagG, tagB] = keyboardConfig.systemLed.tagColor;
-  const [glowTagR, glowTagG, glowTagB] = simulateLedRgb(tagR, tagG, tagB);
+  // LED1 显示状态指示灯三通道混合亮度（仅计入已绑定功能的通道，未绑定通道按 0 计算）
+  const sysLed = keyboardConfig.systemLed;
+  const indR = sysLed.channelR.source !== IndicatorSource.None ? sysLed.indicatorBrightness[0] : 0;
+  const indG = sysLed.channelG.source !== IndicatorSource.None ? sysLed.indicatorBrightness[1] : 0;
+  const indB = sysLed.channelB.source !== IndicatorSource.None ? sysLed.indicatorBrightness[2] : 0;
+  const hasIndLight = indR + indG + indB > 0;
+  const [glowIndR, glowIndG, glowIndB] = simulateLedRgb(indR, indG, indB);
+
   const isLighting = mode === 'lighting';
 
   const rockerModes: Record<RockerMode, string> = {
@@ -115,7 +120,7 @@ export function KeypadPreview({
                 <Paintbrush className="h-3.5 w-3.5" /> 画笔模式：点击键帽直接涂色
               </span>
             ) : (
-              '点选模式：点击键帽或 LED1 单独调色'
+              '点击键帽编辑背光，点击 LED1 编辑系统指示灯'
             )
           ) : (
             '点击小键盘上的任意部件即可编辑'
@@ -192,35 +197,32 @@ export function KeypadPreview({
             </span>
           </button>
 
-          {/* LED1 系统状态灯 */}
+          {/* LED1 系统状态灯：显示状态指示灯三通道混合亮度 */}
           <button
             type="button"
             onClick={() => {
               setSelection({ kind: 'led' });
               if (!isLighting) setActiveTab('lighting');
-              onSelectLed?.();
             }}
-            title="点击配置系统指示灯 LED1"
+            title={`状态指示灯三通道混合亮度 RGB(${indR}, ${indG}, ${indB})`}
             className={`col-span-2 flex flex-col items-center justify-center rounded-xl border py-2.5 transition-all ${
               selection.kind === 'led'
                 ? 'border-fuchsia-400 bg-fuchsia-500/15 ring-2 ring-fuchsia-500/30'
                 : 'border-slate-800 bg-slate-900/70 hover:border-slate-600'
             }`}
             style={{
-              backgroundColor:
-                tagR + tagG + tagB > 0
-                  ? `rgba(${glowTagR}, ${glowTagG}, ${glowTagB}, 0.16)`
-                  : undefined,
+              backgroundColor: hasIndLight
+                ? `rgba(${glowIndR}, ${glowIndG}, ${glowIndB}, 0.10)`
+                : undefined,
             }}
           >
             <div
               className="h-5 w-5 rounded-full border border-white/30"
               style={{
-                backgroundColor: `rgb(${tagR}, ${tagG}, ${tagB})`,
-                boxShadow:
-                  tagR + tagG + tagB > 0
-                    ? `0 0 12px 1px rgba(${glowTagR}, ${glowTagG}, ${glowTagB}, 0.75)`
-                    : 'none',
+                backgroundColor: `rgb(${indR}, ${indG}, ${indB})`,
+                boxShadow: hasIndLight
+                  ? `0 0 10px 1px rgba(${glowIndR}, ${glowIndG}, ${glowIndB}, 0.65)`
+                  : 'none',
               }}
             />
             <span className="mt-1.5 text-[10px] font-medium text-slate-300">LED1</span>
@@ -249,7 +251,7 @@ export function KeypadPreview({
           </button>
         </div>
 
-        {/* 主体 4x4 机械按键矩阵 K1~K16（已去除右上角误导性小圆点） */}
+        {/* 主体 4x4 机械按键矩阵 K1~K16 */}
         <div className="grid grid-cols-4 gap-2.5">
           {keyboardConfig.keys.map((k, idx) => {
             const isSelected = selection.kind === 'key' && selection.index === idx;
@@ -283,10 +285,9 @@ export function KeypadPreview({
                 style={
                   isLighting && hasLight
                     ? {
-                        // 键帽背景展示物理发光氛围（低亮度也能清晰看出此键已配色）
-                        backgroundColor: `rgba(${glowR}, ${glowG}, ${glowB}, 0.28)`,
-                        borderColor: isSelected ? undefined : `rgba(${glowR}, ${glowG}, ${glowB}, 0.65)`,
-                        boxShadow: `0 0 14px -3px rgba(${glowR}, ${glowG}, ${glowB}, 0.55)`,
+                        // 极浅的背景发光氛围：能看清已配色，但不喧宾夺主
+                        backgroundColor: `rgba(${glowR}, ${glowG}, ${glowB}, 0.11)`,
+                        borderColor: isSelected ? undefined : `rgba(${glowR}, ${glowG}, ${glowB}, 0.36)`,
                       }
                     : undefined
                 }
@@ -299,7 +300,6 @@ export function KeypadPreview({
 
                 <div className="flex flex-1 items-center justify-center overflow-hidden px-0.5">
                   {isLighting ? (
-                    /* 中心色块保持真实原始 RGB 颜色 */
                     <div
                       className="h-7 w-7 rounded-lg border border-white/30 shadow-inner"
                       style={{ backgroundColor: `rgb(${rawR}, ${rawG}, ${rawB})` }}
